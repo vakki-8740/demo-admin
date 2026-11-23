@@ -114,11 +114,14 @@ async function githubRequest(path, token, options = {}) {
   if (!response.ok) {
     let message = data.message || `GitHub returned HTTP ${response.status}.`;
     if (response.status === 401) message = 'GitHub rejected the token. Check the token and make sure it has not expired.';
-    if (response.status === 403 && response.headers.get('x-ratelimit-reset')) {
-      const reset = new Date(Number(response.headers.get('x-ratelimit-reset')) * 1000).toLocaleTimeString();
-      message = `GitHub API rate limit reached. Try again after ${reset}. ${message}`;
-    } else if (response.status === 403 && /rate limit/i.test(message)) {
-      message = `GitHub API rate limit reached. Wait a little, then try again. ${message}`;
+    const tokenPermissionError = /resource not accessible by personal access token|permission to .* denied/i.test(message);
+    const rateLimitReached = /rate limit/i.test(message) || response.headers.get('x-ratelimit-remaining') === '0';
+    if (response.status === 403 && tokenPermissionError) {
+      message = `GitHub denied this token's permission. For a fine-grained token, grant the selected repository “Contents: Read and write” and “Metadata: Read-only”; confirm the correct repository is selected and the token is active. For a classic token on a private repository, grant the “repo” scope. Organization repositories may also require approval or SSO authorization. GitHub says: ${message}`;
+    } else if (response.status === 403 && rateLimitReached) {
+      const resetHeader = response.headers.get('x-ratelimit-reset');
+      const reset = resetHeader ? new Date(Number(resetHeader) * 1000).toLocaleTimeString() : null;
+      message = `GitHub API rate limit reached.${reset ? ` Try again after ${reset}.` : ' Wait a little, then try again.'} ${message}`;
     }
     if (response.status === 404) message = 'Repository or branch not found, or your token does not have access.';
     if (response.status === 422 && /already exists/i.test(message)) message = `GitHub rejected the update: ${message}`;
