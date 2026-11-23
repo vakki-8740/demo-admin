@@ -321,6 +321,7 @@ function updateLocalSelection() {
   updateSelectedRepoUI();
 }
 function fileBase64(bytes) { let s=''; for(let i=0;i<bytes.length;i+=0x8000)s+=String.fromCharCode(...bytes.subarray(i,i+0x8000)); return btoa(s); }
+function encodeRepoPath(path) { return path.split('/').map(encodeURIComponent).join('/'); }
 async function mapConcurrent(items, limit, work, progress) {
   let next=0,done=0;
   await Promise.all(Array.from({length:Math.min(limit,items.length)},async()=>{while(next<items.length){const i=next++;items[i].sha=await work(items[i]);progress(++done,items.length);}}));
@@ -334,36 +335,72 @@ async function uploadProject(event) {
   const huge=included.find(item=>item.file.size>MAX_FILE_BYTES);
   if(huge) return showNotice(els.uploadNotice,`“${huge.path}” exceeds the 95 MB per-file limit. Exclude or reduce it first.`,'error');
   if(included.length>MAX_TREE_ENTRIES) return showNotice(els.uploadNotice,'GitHub tree limit is 100,000 entries; exclude some files and upload in batches.','error');
+  let bootstrappedPath=null;
   setBusy(true); els.uploadStatus.textContent='Checking repository access…'; setProgress(1,'Validating repository');
   try {
-    const current=await githubRequest(apiRepoPath(repo));
+    const repositoryPath=apiRepoPath(repo);
+    const current=await githubRequest(repositoryPath);
     if(current.permissions?.push===false) throw new Error('GitHub confirms that your token cannot push to this repository.');
-    const branch=getDefaultBranch(repo); const base=`${apiRepoPath(repo)}/git`;
+    let branch=getDefaultBranch(repo); const base=`${repositoryPath}/git`;
     let ref=null;
     try { ref=await githubRequest(`${base}/ref/heads/${encodeBranch(branch)}`); }
-    catch(error) { if(!/not found|repository is empty/i.test(error.message)) throw error; }
+    catch(error) { if(!/git repository is empty|repository is empty/i.test(error.message)) throw error; }
+
+    // GitHub does not allow creating Git blobs while a repository has no first
+    // commit. Bootstrap the default branch via the Contents API, then use Git
+    // Trees/Commits for the rest of the upload. Existing repos still get one commit.
+    let remaining=included;
     let parentSha=null,baseTree=null;
-    if(ref){parentSha=ref.object.sha;const commit=await githubRequest(`${base}/commits/${parentSha}`);baseTree=commit.tree.sha;}
+    if(!ref) {
+      const first=included[0];
+      els.uploadStatus.textContent='Starting the empty repository…';
+      setProgress(4,'Creating the first repository commit');
+      const bytes=new Uint8Array(await first.file.arrayBuffer());
+      await githubRequest(`${repositoryPath}/contents/${encodeRepoPath(first.path)}`,{
+        method:'PUT',body:jsonBody({message:`Initialize repository with ${first.path}`,content:fileBase64(bytes)})
+      });
+      bootstrappedPath=first.path;
+      const updatedRepo=await githubRequest(repositoryPath);
+      branch=updatedRepo.default_branch||branch;
+      repo.default_branch=branch;
+      ref=await githubRequest(`${base}/ref/heads/${encodeBranch(branch)}`);
+      parentSha=ref.object.sha;
+      const initialCommit=await githubRequest(`${base}/commits/${parentSha}`);
+      baseTree=initialCommit.tree.sha;
+      remaining=included.slice(1);
+    } else {
+      parentSha=ref.object.sha;
+      const parentCommit=await githubRequest(`${base}/commits/${parentSha}`);
+      baseTree=parentCommit.tree.sha;
+    }
+
     els.uploadStatus.textContent=`Uploading ${included.length} ${included.length===1?'file':'files'}…`;
-    await mapConcurrent(included,2,async item=>{
-      const bytes=new Uint8Array(await item.file.arrayBuffer());
-      const blob=await githubRequest(`${base}/blobs`,{method:'POST',body:jsonBody({content:fileBase64(bytes),encoding:'base64'})});
-      return blob.sha;
-    },(done,total)=>setProgress(3+done/total*82,`Uploading file data · ${done} of ${total}`));
-    const treeBody={tree:included.map(({path,sha})=>({path,mode:'100644',type:'blob',sha}))}; if(baseTree)treeBody.base_tree=baseTree;
-    setProgress(88,'Creating a single commit');
-    const tree=await githubRequest(`${base}/trees`,{method:'POST',body:jsonBody(treeBody)});
-    const commitBody={message:`Upload project files (${included.length} files)`,tree:tree.sha}; if(parentSha)commitBody.parents=[parentSha];
-    const commit=await githubRequest(`${base}/commits`,{method:'POST',body:jsonBody(commitBody)});
-    setProgress(96,'Updating repository branch');
-    if(ref) await githubRequest(`${base}/refs/heads/${encodeBranch(branch)}`,{method:'PATCH',body:jsonBody({sha:commit.sha,force:false})});
-    else await githubRequest(`${base}/refs`,{method:'POST',body:jsonBody({ref:`refs/heads/${branch}`,sha:commit.sha})});
+    if(remaining.length) {
+      await mapConcurrent(remaining,2,async item=>{
+        const bytes=new Uint8Array(await item.file.arrayBuffer());
+        const blob=await githubRequest(`${base}/blobs`,{method:'POST',body:jsonBody({content:fileBase64(bytes),encoding:'base64'})});
+        return blob.sha;
+      },(done,total)=>setProgress(8+done/total*76,`Uploading file data · ${done} of ${total}`));
+      const treeBody={base_tree:baseTree,tree:remaining.map(({path,sha})=>({path,mode:'100644',type:'blob',sha}))};
+      setProgress(88,'Creating a single commit for remaining files');
+      const tree=await githubRequest(`${base}/trees`,{method:'POST',body:jsonBody(treeBody)});
+      const commit=await githubRequest(`${base}/commits`,{method:'POST',body:jsonBody({message:`Upload remaining project files (${remaining.length})`,tree:tree.sha,parents:[parentSha]})});
+      setProgress(96,'Updating repository branch');
+      await githubRequest(`${base}/refs/heads/${encodeBranch(branch)}`,{method:'PATCH',body:jsonBody({sha:commit.sha,force:false})});
+    }
     setProgress(100,'Upload complete');
     els.uploadStatus.textContent='Your project is now on GitHub.';
-    showNotice(els.uploadNotice,`Uploaded ${included.length} ${included.length===1?'file':'files'} to ${repo.full_name} in one commit. Existing files were preserved.`,'success');
+    const commitInfo=bootstrappedPath
+      ? (remaining.length ? 'The empty repository was initialized first, then the remaining files were added in a follow-up commit.' : 'The empty repository was initialized with its first commit.')
+      : 'All files were uploaded in one commit; existing repository files were preserved.';
+    showNotice(els.uploadNotice,`Uploaded ${included.length} ${included.length===1?'file':'files'} to ${repo.full_name}. ${commitInfo}`,'success');
     els.repoLink.href=`${repo.html_url}/tree/${branch.split('/').map(encodeURIComponent).join('/')}`; els.repoLink.hidden=false;
     state.files=[]; if(document.querySelector('[data-page-panel="manager"]').classList.contains('active')) await refreshContents();
-  } catch(error) { els.uploadStatus.textContent='Upload could not be completed.';showNotice(els.uploadNotice,error.message,'error');els.uploadProgress.hidden=true; }
+  } catch(error) {
+    els.uploadStatus.textContent='Upload could not be completed.';
+    const detail=bootstrappedPath?`GitHub created the first commit with “${bootstrappedPath}”, but the rest did not finish. Retry the upload to continue. ${error.message}`:error.message;
+    showNotice(els.uploadNotice,detail,'error');els.uploadProgress.hidden=true;
+  }
   finally {setBusy(false);}
 }
 
