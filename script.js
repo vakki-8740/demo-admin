@@ -125,7 +125,9 @@ async function githubRequest(path, token, options = {}) {
     }
     if (response.status === 404) message = 'Repository or branch not found, or your token does not have access.';
     if (response.status === 422 && /already exists/i.test(message)) message = `GitHub rejected the update: ${message}`;
-    throw new Error(message);
+    // Include the endpoint (never the token) so permission failures can be
+    // diagnosed by identifying whether blob, tree, commit, or ref access failed.
+    throw new Error(`${message} (request: ${options.method || 'GET'} ${path})`);
   }
   return data;
 }
