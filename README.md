@@ -8,6 +8,8 @@ Enter your GitHub username and personal access token on the sign-in page each ti
 
 ## Deploy
 
-Deploy `index.html`, `style.css`, and `script.js` as static files on Vercel. Keep the three files in the same directory. Open the deployed URL, sign in, select a repository, then upload/manage files.
+Deploy `index.html`, `style.css`, `script.js`, and the complete `icons/` folder as static files on Vercel. Keep the `icons/` directory intact because the interface loads local SVG masks from it. Open the deployed URL, sign in, select a repository, then upload/manage files.
+
+Icons are from [Iconoir](https://github.com/iconoir-icons/iconoir), licensed under MIT; the included `icons/LICENSE` contains the license notice.
 
 Fine-grained GitHub PATs need access to the selected repository and Contents read/write permission for upload/edit/delete operations. Classic PATs generally need `repo` scope for private repositories. Keep tokens private and use an expiration date.

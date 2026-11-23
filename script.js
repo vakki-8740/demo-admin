@@ -84,7 +84,7 @@ async function signIn(event) {
   }catch(error){
     state.credentials={username:'',token:'',openaiKey:''};
     showNotice(els.loginNotice,error.message,'error');
-  }finally{els.loginButton.disabled=false;els.loginButton.textContent='Connect to GitHub';}
+  }finally{els.loginButton.disabled=false;els.loginButton.replaceChildren(iconNode('github'),document.createTextNode('Connect to GitHub'));}
 }
 function signOut() {
   state.credentials={username:'',token:'',openaiKey:''};state.repos=[];state.selectedRepo=null;state.files=[];state.selectedPaths.clear();
@@ -344,7 +344,8 @@ function directEntries(dir) {
   for(const file of state.files){if(!file.path.startsWith(prefix))continue;const rest=file.path.slice(prefix.length);if(!rest)continue;const slash=rest.indexOf('/');if(slash>=0)folders.add(prefix+rest.slice(0,slash));else files.push(file);}
   return {folders:[...folders].sort((a,b)=>a.localeCompare(b)),files:files.sort((a,b)=>a.path.localeCompare(b.path))};
 }
-function makeButton(label,className,handler,title='') {const b=document.createElement('button');b.type='button';b.className=className;b.textContent=label;if(title)b.title=title;b.addEventListener('click',handler);return b;}
+function iconNode(name, extraClass='') {const icon=document.createElement('span');icon.className=`io-icon io-${name} ${extraClass}`.trim();icon.setAttribute('aria-hidden','true');return icon;}
+function makeButton(label,className,handler,title='',iconName='') {const b=document.createElement('button');b.type='button';b.className=className;if(iconName)b.append(iconNode(iconName));b.append(document.createTextNode(label));if(title)b.title=title;b.addEventListener('click',handler);return b;}
 function renderBreadcrumbs() {
   els.breadcrumbs.replaceChildren();const segments=state.currentDir?state.currentDir.split('/'):[];
   const root=makeButton(state.selectedRepo?.name||'Repository','crumb',()=>{state.currentDir='';renderFileList();});els.breadcrumbs.append(root);
@@ -363,19 +364,19 @@ function renderFileList() {
   els.selectVisible.indeterminate=files.some(file=>state.selectedPaths.has(file.path))&&!els.selectVisible.checked;
   for(const folderPath of folders){
     const row=document.createElement('div');row.className='file-row folder-row';
-    const item=document.createElement('div');item.className='file-item';const glyph=document.createElement('span');glyph.className='file-symbol';glyph.textContent='▰';item.append(glyph);
+    const item=document.createElement('div');item.className='file-item';const glyph=document.createElement('span');glyph.className='file-symbol';glyph.append(iconNode('folder'));item.append(glyph);
     const name=makeButton(folderPath.split('/').pop(),'file-name-button',()=>{state.currentDir=folderPath;renderFileList();});item.append(name);
     const size=document.createElement('span');size.className='file-size';size.textContent='Folder';
-    const actions=document.createElement('div');actions.className='file-actions';actions.append(makeButton('Delete folder','text-action danger',()=>deleteFolder(folderPath),`Delete ${folderPath}`));
+    const actions=document.createElement('div');actions.className='file-actions';actions.append(makeButton('Delete folder','text-action danger',()=>deleteFolder(folderPath),`Delete ${folderPath}`,'trash'));
     row.append(item,size,actions);els.fileList.append(row);
   }
   for(const file of files){
     const row=document.createElement('div');row.className='file-row';
     const item=document.createElement('div');item.className='file-item';const check=document.createElement('input');check.type='checkbox';check.checked=state.selectedPaths.has(file.path);check.setAttribute('aria-label',`Select ${file.path}`);check.addEventListener('change',()=>{if(check.checked)state.selectedPaths.add(file.path);else state.selectedPaths.delete(file.path);updateSelectedRepoUI();updateSelectedCount();renderSelectAllState(files);});
-    const glyph=document.createElement('span');glyph.className='file-symbol';glyph.textContent='▤';item.append(check,glyph);
+    const glyph=document.createElement('span');glyph.className='file-symbol';glyph.append(iconNode('code'));item.append(check,glyph);
     item.append(makeButton(file.path.split('/').pop(),'file-name-button',()=>previewFile(file),`Preview ${file.path}`));
     const size=document.createElement('span');size.className='file-size';size.textContent=formatSize(file.size);
-    const actions=document.createElement('div');actions.className='file-actions';actions.append(makeButton('Edit','text-action',()=>previewFile(file),`Edit ${file.path}`),makeButton('Move / rename','text-action',()=>moveFile(file),`Move or rename ${file.path}`),makeButton('Delete','text-action danger',()=>deletePaths([file.path],`Delete “${file.path}”?`),'Delete file'));
+    const actions=document.createElement('div');actions.className='file-actions';actions.append(makeButton('Edit','text-action',()=>previewFile(file),`Edit ${file.path}`,'edit-pencil'),makeButton('Move / rename','text-action',()=>moveFile(file),`Move or rename ${file.path}`,'arrow-right'),makeButton('Delete','text-action danger',()=>deletePaths([file.path],`Delete “${file.path}”?`),'Delete file','trash'));
     row.append(item,size,actions);els.fileList.append(row);
   }
   updateSelectedCount();updateSelectedRepoUI();
@@ -427,7 +428,7 @@ async function refreshHistory() {
     els.historyEmpty.hidden=commits.length!==0;
     for(const item of commits){
       const card=document.createElement('article');card.className='history-item';
-      const icon=document.createElement('span');icon.className='history-icon';icon.textContent='↗';
+      const icon=document.createElement('span');icon.className='history-icon';icon.append(iconNode('git-branch'));
       const info=document.createElement('div');info.className='history-info';
       const title=document.createElement('strong');title.textContent=(item.commit.message||'Repository update').split('\n')[0];
       const meta=document.createElement('span');const who=item.commit.author?.name||item.author?.login||'GitHub user';const when=item.commit.author?.date?new Date(item.commit.author.date).toLocaleString():'Date unavailable';meta.textContent=`${who} · ${when}`;
@@ -538,7 +539,7 @@ els.logoutButton.addEventListener('click',signOut);
 document.querySelectorAll('.nav-link').forEach(button=>button.addEventListener('click',()=>goPage(button.dataset.page)));
 document.querySelectorAll('[data-page-link]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault();goPage(link.dataset.pageLink);}));
 els.settingsForm.addEventListener('submit',saveSettings);els.testConnection.addEventListener('click',testConnection);els.clearCredentials.addEventListener('click',clearCredentials);
-document.querySelectorAll('[data-toggle-secret]').forEach(button=>button.addEventListener('click',()=>{const input=document.getElementById(button.dataset.toggleSecret);const show=input.type==='password';input.type=show?'text':'password';button.textContent=show?'Hide':'Show';}));
+document.querySelectorAll('[data-toggle-secret]').forEach(button=>button.addEventListener('click',()=>{const input=document.getElementById(button.dataset.toggleSecret);const show=input.type==='password';input.type=show?'text':'password';button.replaceChildren(iconNode(show?'eye-closed':'eye'),document.createTextNode(show?' Hide':' Show'));}));
 els.refreshRepos.addEventListener('click',()=>refreshRepositories());
 document.querySelectorAll('[data-refresh-repos]').forEach(button=>button.addEventListener('click',()=>refreshRepositories()));
 document.querySelectorAll('[data-go]').forEach(button=>button.addEventListener('click',()=>{if(button.dataset.replace==='true'){const radio=document.querySelector('input[name=uploadMode][value=replace]');if(radio)radio.checked=true;}goPage(button.dataset.go);}));
