@@ -322,7 +322,7 @@ function directEntries(dir) {
   return {folders:[...folders].sort((a,b)=>a.localeCompare(b)),files:files.sort((a,b)=>a.path.localeCompare(b.path))};
 }
 function iconNode(name, extraClass='') {const icon=document.createElement('span');icon.className=`io-icon io-${name} ${extraClass}`.trim();icon.setAttribute('aria-hidden','true');return icon;}
-function makeButton(label,className,handler,title='',iconName='') {const b=document.createElement('button');b.type='button';b.className=className;if(iconName)b.append(iconNode(iconName));b.append(document.createTextNode(label));if(title)b.title=title;b.addEventListener('click',handler);return b;}
+function makeButton(label,className,handler,title='',iconName='') {const b=document.createElement('button');b.type='button';b.className=className;if(iconName)b.append(iconNode(iconName));b.append(document.createTextNode(label));if(title)b.title=title;b.setAttribute('aria-label',title||label);b.addEventListener('click',handler);return b;}
 function renderBreadcrumbs() {
   els.breadcrumbs.replaceChildren();const segments=state.currentDir?state.currentDir.split('/'):[];
   const root=makeButton(state.selectedRepo?.name||'Repository','crumb',()=>{state.currentDir='';renderFileList();});els.breadcrumbs.append(root);

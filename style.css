@@ -60,3 +60,46 @@ body .shell{width:min(1080px,calc(100% - 48px))}.intro h1,.page-heading h1{color
 .io-icon{display:inline-block;width:17px;height:17px;flex:none;background-color:currentColor;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;-webkit-mask-position:center;mask-position:center;-webkit-mask-size:contain;mask-size:contain;vertical-align:middle}
 .io-github{-webkit-mask-image:url('icons/github.svg');mask-image:url('icons/github.svg')}.io-home{-webkit-mask-image:url('icons/home.svg');mask-image:url('icons/home.svg')}.io-cloud-upload{-webkit-mask-image:url('icons/cloud-upload.svg');mask-image:url('icons/cloud-upload.svg')}.io-folder{-webkit-mask-image:url('icons/folder.svg');mask-image:url('icons/folder.svg')}.io-edit-pencil{-webkit-mask-image:url('icons/edit-pencil.svg');mask-image:url('icons/edit-pencil.svg')}.io-clock{-webkit-mask-image:url('icons/clock.svg');mask-image:url('icons/clock.svg')}.io-settings{-webkit-mask-image:url('icons/settings.svg');mask-image:url('icons/settings.svg')}.io-arrow-up-right{-webkit-mask-image:url('icons/arrow-up-right.svg');mask-image:url('icons/arrow-up-right.svg')}.io-page-plus{-webkit-mask-image:url('icons/page-plus.svg');mask-image:url('icons/page-plus.svg')}.io-refresh{-webkit-mask-image:url('icons/refresh.svg');mask-image:url('icons/refresh.svg')}.io-trash{-webkit-mask-image:url('icons/trash.svg');mask-image:url('icons/trash.svg')}.io-search{-webkit-mask-image:url('icons/search.svg');mask-image:url('icons/search.svg')}.io-eye{-webkit-mask-image:url('icons/eye.svg');mask-image:url('icons/eye.svg')}.io-eye-closed{-webkit-mask-image:url('icons/eye-closed.svg');mask-image:url('icons/eye-closed.svg')}.io-git-branch{-webkit-mask-image:url('icons/git-branch.svg');mask-image:url('icons/git-branch.svg')}.io-code{-webkit-mask-image:url('icons/code.svg');mask-image:url('icons/code.svg')}.io-check{-webkit-mask-image:url('icons/check.svg');mask-image:url('icons/check.svg')}.io-warning-triangle{-webkit-mask-image:url('icons/warning-triangle.svg');mask-image:url('icons/warning-triangle.svg')}.io-arrow-right{-webkit-mask-image:url('icons/arrow-right.svg');mask-image:url('icons/arrow-right.svg')}.io-plus{-webkit-mask-image:url('icons/plus.svg');mask-image:url('icons/plus.svg')}.io-nav-arrow-right{-webkit-mask-image:url('icons/nav-arrow-right.svg');mask-image:url('icons/nav-arrow-right.svg')}.io-download{-webkit-mask-image:url('icons/download.svg');mask-image:url('icons/download.svg')}
 .nav-link{display:inline-flex;align-items:center;gap:6px}.nav-link .io-icon{width:15px;height:15px}.home-icon .io-icon{width:19px;height:19px}.brand-mark .io-icon{width:20px;height:20px}.login-mark .io-icon{width:24px;height:24px}.picker-button .io-icon,.button .io-icon{width:15px;height:15px}.file-symbol .io-icon{width:15px;height:15px}.file-actions .io-icon{width:13px;height:13px}.file-actions .text-action{display:inline-flex;align-items:center;gap:4px}.history-icon .io-icon{width:16px;height:16px}.text-button{display:inline-flex;align-items:center;gap:4px}.home-card b{display:flex;align-items:center;gap:4px}.install-button{height:32px;padding:0 11px;font-size:10px}.login-card .install-button{display:flex;width:max-content;margin:14px auto 0}
+
+/* Responsive layouts: wide desktop, compact tablet, and narrow phones. */
+@media (min-width:761px) and (max-width:1100px){
+  .topbar{height:auto;min-height:68px;flex-wrap:wrap;padding:10px 22px;gap:10px 18px}
+  .main-nav{order:3;flex:1 0 100%;justify-content:center;min-height:38px}
+  .top-actions{margin-left:auto}
+  body .shell{width:calc(100% - 44px)}
+  .home-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:760px){
+  body{min-width:320px}
+  body .shell{width:calc(100% - 24px)}
+  .topbar{position:sticky;top:0;height:auto;min-height:58px;flex-wrap:wrap;padding:9px 12px;gap:8px 10px}
+  .brand{font-size:12px;gap:7px}.brand-mark{width:28px;height:28px}
+  .top-actions{margin-left:auto;gap:5px}.top-actions .install-button{width:34px;height:34px;padding:0;font-size:0;justify-content:center}.top-actions .install-button .io-icon{width:17px;height:17px}
+  .main-nav{order:3;flex:1 0 100%;width:100%;display:flex;justify-content:flex-start;overflow-x:auto;overflow-y:hidden;gap:4px;padding:2px 0 0;scrollbar-width:none;-webkit-overflow-scrolling:touch}.main-nav::-webkit-scrollbar{display:none}
+  .nav-link{flex:none;white-space:nowrap;padding:8px 9px;font-size:10px}
+  .intro{padding:28px 0 17px}.intro h1{font-size:29px}.subtitle{font-size:12px}
+  .panel{padding:18px 15px;margin-bottom:12px}.section-heading{gap:9px;margin-bottom:15px}.section-heading p{font-size:10px}
+  .home-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.home-card{min-height:158px;padding:14px;gap:7px;border-radius:12px}.home-card strong{font-size:12px}.home-card>span:not(.home-icon){font-size:10px}.home-card b{font-size:10px}.home-icon{width:31px;height:31px}
+  .repo-select-row{grid-template-columns:minmax(0,1fr) 38px;gap:7px}.repo-select-panel{padding:14px}.helper-line{font-size:9px}
+  .folder-picker{min-height:165px;padding:22px 12px}.picker-copy strong{font-size:12px}.picker-copy small{font-size:10px;max-width:260px}.folder-summary{font-size:9px}
+  .upload-area{grid-template-columns:1fr;padding:15px;gap:10px}.upload-area>.button-primary{width:100%}.upload-copy h2{font-size:14px}.upload-copy p{font-size:10px}
+  .page-heading{padding:26px 0 15px;gap:10px}.page-heading h1{font-size:26px}.page-heading .subtitle{font-size:11px}.heading-actions{gap:6px}.heading-actions .button,.page-heading>.button{height:33px;padding:0 9px;font-size:9px}
+  .manager-panel{overflow:hidden}.manager-toolbar{align-items:stretch;flex-direction:column;padding:11px;gap:8px}.manager-actions{width:100%;display:flex;flex-wrap:wrap;gap:6px}.search-input{flex:1 1 100%;width:100%;order:-1}.manager-actions .button{height:30px;padding:0 8px;font-size:9px}
+  .file-list-head,.file-row{grid-template-columns:minmax(0,1fr) 43px 94px;gap:4px;padding:8px}.file-list-head{font-size:8px}.file-row{min-height:44px}.file-item{gap:5px}.file-name-button{font-size:9px}.file-symbol{width:14px}.file-size{font-size:8px}.file-actions{gap:1px}.file-actions .text-action{font-size:0;width:27px;height:28px;padding:0;justify-content:center}.file-actions .io-icon{width:14px;height:14px}.breadcrumbs{max-width:100%;font-size:9px}.crumb{font-size:9px;padding:3px}
+  .settings-panel{width:100%}.settings-form{gap:14px}.settings-actions{gap:6px}.settings-actions .button{flex:1 1 auto;padding:0 9px;font-size:9px}.vault-info{gap:9px;padding:14px}.vault-info p{font-size:9px}
+  .history-item{grid-template-columns:30px minmax(0,1fr) 48px;gap:8px;padding:12px 2px}.history-info strong{font-size:10px}.history-info span,.history-item code,.history-item a{font-size:9px}.history-item a{grid-column:2/-1}
+  footer{font-size:8px;padding:14px 1px 22px}
+}
+@media(max-width:540px){
+  .home-grid{grid-template-columns:1fr}.home-card{min-height:126px}.page-heading{flex-direction:column;align-items:stretch}.heading-actions{align-self:flex-start}.page-heading>.button{align-self:flex-start}.login-screen{padding:16px}.login-card{padding:28px 20px 22px;border-radius:15px}.login-card h1{font-size:22px}.login-card>.subtitle{font-size:11px}
+  .file-list-head,.file-row{grid-template-columns:minmax(0,1fr) 38px 87px;gap:3px;padding:7px 6px}.file-actions .text-action{width:25px}.manager-actions .button{flex:1}.manager-actions .search-input{flex-basis:100%}.settings-actions{display:grid;grid-template-columns:1fr 1fr}.settings-actions .button-primary{grid-column:1/-1}
+}
+@media(max-width:360px){
+  body .shell{width:calc(100% - 18px)}.topbar{padding-left:9px;padding-right:9px}.brand>span:last-child{font-size:10px}.nav-link{padding:7px;font-size:9px}.home-card{padding:12px}.file-list-head,.file-row{grid-template-columns:minmax(0,1fr) 32px 78px}.file-actions .text-action{width:23px}.file-actions .io-icon{width:12px;height:12px}.heading-actions .button{font-size:8px;padding:0 7px}.connection-badge{display:none}
+}
+
+/* Green GitHub mark used as the app identity across screens. */
+.brand-mark,.login-mark{background:#ecfdf3;color:#16a34a}
+.brand-mark img{display:block;width:24px;height:24px}
+.brand-mark.large img{width:31px;height:31px}
+.login-mark img{width:27px;height:27px}

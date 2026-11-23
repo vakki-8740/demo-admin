@@ -12,7 +12,7 @@ On first use, create a vault passphrase (10+ characters), then add the GitHub us
 
 ## Files to deploy
 
-Keep `index.html`, `style.css`, `script.js`, `manifest.webmanifest`, `service-worker.js`, and the complete `icons/` directory together at the site root. The `icons/` folder contains local SVG UI icons and 192/512px PWA app icons.
+Keep `index.html`, `style.css`, `script.js`, `manifest.webmanifest`, `service-worker.js`, and the complete `icons/` directory together at the site root. The `icons/` folder contains local SVG UI icons, a green GitHub logo/favicon, and matching 192/512px PWA app icons.
 
 Fine-grained GitHub PATs need access to the selected repository and Contents read/write permission for upload/edit/delete operations. Classic PATs generally need `repo` scope for private repositories. Use an expiration date and keep tokens private.
 
