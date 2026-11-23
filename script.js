@@ -1,22 +1,21 @@
 'use strict';
 
-// Static browser app: secrets are encrypted with Web Crypto and stored only as
-// ciphertext in IndexedDB. GitHub/OpenAI requests go directly from this browser.
+// Local desktop-style app: credentials are held by the Python OS-keychain
+// helper; GitHub/OpenAI requests go directly from this browser.
 const API_ROOT = 'https://api.github.com';
-const DB_NAME = 'github-manager-vault';
-const DB_STORE = 'encrypted-settings';
-const VAULT_ID = 'main';
-const KDF_ITERATIONS = 310000;
 const MAX_FILE_BYTES = 95 * 1024 * 1024;
 const MAX_TREE_ENTRIES = 100000;
 const els = Object.fromEntries([
-  'vaultGate','vaultTitle','vaultDescription','vaultForm','vaultPassword','vaultConfirm','vaultPasswordField','vaultConfirmField','vaultButton','vaultNotice',
   'app','repoSelect','refreshRepos','uploadPermission','folderInput','chooseFolder','folderName','folderSummary','fileCount','excludedCount','excludePatterns','uploadForm','uploadButton','uploadStatus','uploadProgress','progressLabel','progressPercent','progressBar','uploadNotice','repoLink','suggestButton',
-  'connectionBadge','lockButton','footerLock','settingsForm','settingsUsername','settingsToken','settingsOpenai','settingsStatus','saveSettings','testConnection','clearCredentials','managerMessage','managerNotice','fileList','emptyState','visibleCount','selectVisible','deleteSelected','selectedCount','deleteAll','breadcrumbs','refreshContents','filePreviewPanel','previewTitle','previewContent','closePreview'
+  'connectionBadge','settingsForm','settingsUsername','settingsToken','settingsOpenai','settingsStatus','saveSettings','testConnection','clearCredentials','managerMessage','managerNotice','fileList','emptyState','visibleCount','selectVisible','deleteSelected','selectedCount','deleteAll','breadcrumbs','refreshContents','filePreviewPanel','previewTitle','previewContent','closePreview'
 ].map(id => [id, document.getElementById(id)]));
+Object.assign(els, Object.fromEntries([
+  'repoSelectUpload','uploadPermissionMirror','homeNotice','fileSearch','createFile','refreshHistory','historySummary','historyList','historyEmpty','saveFileEdit','editorStatus','uploadModeReplace'
+].map(id => [id, document.getElementById(id)])));
 const state = {
-  db: null, key: null, credentials: { username: '', token: '', openaiKey: '' },
-  repos: [], selectedRepo: null, files: [], currentDir: '', selectedPaths: new Set(), busy: false, vaultExists: false
+  credentials: { username: '', token: '', openaiKey: '' }, repos: [], selectedRepo: null,
+  files: [], currentDir: '', selectedPaths: new Set(), busy: false, keychainReady: false,
+  activityHistory: [], editorPath: null, editorSha: null
 };
 
 function showNotice(element, message, type = 'info') {
@@ -53,144 +52,59 @@ function goPage(page) {
   });
   document.querySelectorAll('.nav-link').forEach(button => button.classList.toggle('active', button.dataset.page === page));
   if (page === 'manager' && state.selectedRepo && !state.files.length) refreshContents();
+  if (page === 'history' && state.selectedRepo) refreshHistory();
 }
 
-// ---- Encrypted local vault (AES-GCM + PBKDF2, no plaintext localStorage) ----
-function openDatabase() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 1);
-    request.onupgradeneeded = () => request.result.createObjectStore(DB_STORE, { keyPath: 'id' });
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new Error('Could not open browser storage.'));
-  });
+// ---- OS keychain bridge. This app and helper share one localhost origin. ----
+async function keychainRequest(path, options = {}) {
+  let response;
+  try {
+    response = await fetch(path, {
+      ...options,
+      headers: { 'X-Local-App': 'GitHubManager', ...(options.body ? {'Content-Type':'application/json'} : {}), ...(options.headers||{}) }
+    });
+  } catch {
+    throw new Error('Local keychain helper is not running. Start it with python server.py and reopen http://localhost:8765.');
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `Local helper returned HTTP ${response.status}.`);
+  return data;
 }
-function readVaultRecord() {
-  return new Promise((resolve, reject) => {
-    const request = state.db.transaction(DB_STORE, 'readonly').objectStore(DB_STORE).get(VAULT_ID);
-    request.onsuccess = () => resolve(request.result || null);
-    request.onerror = () => reject(request.error || new Error('Could not read the encrypted vault.'));
-  });
-}
-function writeVaultRecord(record) {
-  return new Promise((resolve, reject) => {
-    const tx = state.db.transaction(DB_STORE, 'readwrite');
-    tx.objectStore(DB_STORE).put(record);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error || new Error('Could not save the encrypted vault.'));
-    tx.onabort = () => reject(tx.error || new Error('Vault save was cancelled.'));
-  });
-}
-function deleteVaultRecord() {
-  return new Promise((resolve, reject) => {
-    const tx = state.db.transaction(DB_STORE, 'readwrite');
-    tx.objectStore(DB_STORE).delete(VAULT_ID);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error || new Error('Could not clear the vault.'));
-  });
-}
-async function deriveKey(passphrase, salt) {
-  const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
-  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: KDF_ITERATIONS, hash: 'SHA-256' }, material, { name: 'AES-GCM', length: 256 }, false, ['encrypt','decrypt']);
-}
-async function encryptSettings(settings, key = state.key) {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const plaintext = new TextEncoder().encode(JSON.stringify(settings));
-  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext);
-  const prior = await readVaultRecord();
-  return { id: VAULT_ID, version: 1, iterations: KDF_ITERATIONS, salt: prior?.salt, iv: toBase64(iv), ciphertext: toBase64(new Uint8Array(ciphertext)) };
-}
-async function saveEncryptedSettings(settings) {
-  const prior = await readVaultRecord();
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const plaintext = new TextEncoder().encode(JSON.stringify(settings));
-  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, state.key, plaintext);
-  await writeVaultRecord({ id: VAULT_ID, version: 1, iterations: prior.iterations || KDF_ITERATIONS, salt: prior.salt, iv: toBase64(iv), ciphertext: toBase64(new Uint8Array(ciphertext)) });
-}
-function toBase64(bytes) {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(binary);
-}
-function fromBase64(text) { return Uint8Array.from(atob(text), char => char.charCodeAt(0)); }
-async function createVault(passphrase) {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  state.key = await deriveKey(passphrase, salt);
-  state.credentials = { username: '', token: '', openaiKey: '', selectedRepo: '' };
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, state.key, new TextEncoder().encode(JSON.stringify(state.credentials)));
-  await writeVaultRecord({ id: VAULT_ID, version: 1, iterations: KDF_ITERATIONS, salt: toBase64(salt), iv: toBase64(iv), ciphertext: toBase64(new Uint8Array(ciphertext)) });
-  state.vaultExists = true;
-  enterApp();
-}
-async function unlockVault(passphrase, record) {
-  const iterations = record.iterations || KDF_ITERATIONS;
-  const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
-  state.key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt: fromBase64(record.salt), iterations, hash: 'SHA-256' }, material, { name: 'AES-GCM', length: 256 }, false, ['encrypt','decrypt']);
-  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromBase64(record.iv) }, state.key, fromBase64(record.ciphertext));
-  state.credentials = JSON.parse(new TextDecoder().decode(plaintext));
-  state.vaultExists = true;
-  enterApp();
-}
-function configureVaultScreen(exists) {
-  state.vaultExists = exists;
-  els.vaultConfirmField.hidden = exists;
-  els.vaultTitle.textContent = exists ? 'Unlock your vault' : 'Create your local vault';
-  els.vaultDescription.textContent = exists
-    ? 'Your GitHub and OpenAI credentials are encrypted on this device. Enter your vault passphrase to continue.'
-    : 'Choose a vault passphrase. It encrypts your credentials on this device and is required each time you open the app.';
-  els.vaultButton.textContent = exists ? 'Unlock vault' : 'Create encrypted vault';
-  els.vaultPassword.autocomplete = exists ? 'current-password' : 'new-password';
+async function saveKeychainCredentials(credentials) {
+  await keychainRequest('/api/credentials', {method:'POST', body:JSON.stringify(credentials)});
 }
 async function initializeVault() {
-  if (!window.isSecureContext || !window.crypto?.subtle || !window.indexedDB) {
-    showNotice(els.vaultNotice, 'Secure browser storage is unavailable. Open this app from http://localhost (not file://) in a current browser.', 'error');
-    els.vaultButton.disabled = true;
-    return;
-  }
+  els.app.hidden = false;
   try {
-    state.db = await openDatabase();
-    const record = await readVaultRecord();
-    configureVaultScreen(Boolean(record));
+    const status = await keychainRequest('/api/status');
+    const result = await keychainRequest('/api/credentials');
+    state.credentials = result.credentials || {username:'',token:'',openaiKey:''};
+    state.keychainReady = Boolean(status.ok);
+    fillSettingsForm();
+    if (result.configured && state.credentials.token && state.credentials.username) {
+      els.connectionBadge.querySelector('span').textContent = 'Connecting…';
+      await refreshRepositories();
+      goPage('home');
+    } else {
+      els.connectionBadge.classList.add('offline');
+      els.connectionBadge.querySelector('span').textContent = 'Setup needed';
+      renderRepoOptions('Save GitHub credentials in Settings');
+      goPage('settings');
+      setSettingsStatus(`OS keychain ready (${status.keychain}). Add credentials and save once.`, 'success');
+    }
   } catch (error) {
-    showNotice(els.vaultNotice, error.message, 'error');
+    els.connectionBadge.classList.add('offline');
+    els.connectionBadge.querySelector('span').textContent = 'Keychain unavailable';
+    goPage('settings');
+    fillSettingsForm();
+    setSettingsStatus(error.message, 'error');
   }
 }
 function enterApp() {
-  els.vaultGate.hidden = true;
   els.app.hidden = false;
-  els.vaultPassword.value = '';
-  els.vaultConfirm.value = '';
-  els.connectionBadge.classList.add('offline');
-  els.connectionBadge.querySelector('span').textContent = state.credentials.token ? 'Connecting…' : 'Credentials needed';
   fillSettingsForm();
-  if (state.credentials.token && state.credentials.username) {
-    refreshRepositories().catch(() => {});
-  } else {
-    renderRepoOptions('Open Settings to add your GitHub username and token.');
-    goPage('upload');
-  }
-}
-function lockVault() {
-  if (state.busy) return;
-  state.key = null;
-  state.credentials = { username: '', token: '', openaiKey: '', selectedRepo: '' };
-  state.repos = [];
-  state.selectedRepo = null;
-  state.files = [];
-  state.selectedPaths.clear();
-  selectedLocalFiles = [];
-  els.folderName.textContent = 'Select a project folder';
-  els.folderSummary.hidden = true;
-  els.settingsUsername.value = '';
-  els.settingsToken.value = '';
-  els.settingsOpenai.value = '';
-  els.app.hidden = true;
-  els.vaultGate.hidden = false;
-  els.vaultPassword.value = '';
-  els.vaultConfirm.value = '';
-  clearNotice(els.vaultNotice);
-  configureVaultScreen(true);
-  els.vaultPassword.focus();
+  if (state.credentials.token && state.credentials.username) refreshRepositories();
+  else goPage('settings');
 }
 
 // ---- GitHub REST API ----
@@ -249,22 +163,17 @@ async function fetchAllRepositories() {
 }
 function repoLabel(repo) { return `${repo.full_name}${repo.private ? ' · private' : ''}${canWrite(repo) ? '' : ' · read-only'}`; }
 function renderRepoOptions(placeholder = 'Select a repository…') {
-  const prior = state.credentials.selectedRepo || state.selectedRepo?.full_name || '';
-  els.repoSelect.replaceChildren();
-  const first = document.createElement('option'); first.value = ''; first.textContent = placeholder; els.repoSelect.append(first);
-  state.repos.forEach(repo => {
-    const option = document.createElement('option'); option.value = repo.full_name; option.textContent = repoLabel(repo); els.repoSelect.append(option);
-  });
+  const prior = localStorage.getItem('selectedRepo') || state.credentials.selectedRepo || state.selectedRepo?.full_name || '';
   const selected = state.repos.find(repo => repo.full_name === prior) || state.repos.find(canWrite) || state.repos[0] || null;
-  if (selected) {
-    state.selectedRepo = selected;
-    els.repoSelect.value = selected.full_name;
-    state.credentials.selectedRepo = selected.full_name;
-  } else {
-    state.selectedRepo = null;
-    els.repoSelect.value = '';
-  }
-  els.repoSelect.disabled = !state.repos.length;
+  [els.repoSelect, els.repoSelectUpload].filter(Boolean).forEach(select => {
+    select.replaceChildren();
+    const first = document.createElement('option'); first.value = ''; first.textContent = placeholder; select.append(first);
+    state.repos.forEach(repo => { const option=document.createElement('option');option.value=repo.full_name;option.textContent=repoLabel(repo);select.append(option); });
+    select.disabled = !state.repos.length;
+    select.value = selected?.full_name || '';
+  });
+  state.selectedRepo = selected;
+  if (selected) { state.credentials.selectedRepo = selected.full_name; try {localStorage.setItem('selectedRepo',selected.full_name);} catch {} }
   updateSelectedRepoUI();
 }
 async function refreshRepositories() {
@@ -295,9 +204,12 @@ async function refreshRepositories() {
 function updateSelectedRepoUI() {
   const repo = state.selectedRepo;
   els.uploadButton.disabled = state.busy || !repo || !includedLocalFiles().length || !canWrite(repo);
-  els.uploadPermission.textContent = !repo ? 'Save GitHub credentials and select a repository.'
+  const permissionText = !repo ? 'Save GitHub credentials and select a repository.'
     : canWrite(repo) ? `${repo.full_name} · ${getDefaultBranch(repo)} branch · write access available.`
     : `${repo.full_name} is read-only for this token; select a repository with write access.`;
+  els.uploadPermission.textContent = permissionText;
+  if (els.uploadPermissionMirror) els.uploadPermissionMirror.textContent = permissionText;
+  [els.repoSelect,els.repoSelectUpload].filter(Boolean).forEach(select=>{if(repo)select.value=repo.full_name;});
   els.deleteSelected.disabled = state.busy || !repo || !canWrite(repo) || state.selectedPaths.size === 0;
   els.deleteAll.disabled = state.busy || !repo || !canWrite(repo) || state.files.length === 0;
 }
@@ -329,6 +241,7 @@ async function mapConcurrent(items, limit, work, progress) {
 async function uploadProject(event) {
   event.preventDefault(); clearNotice(els.uploadNotice); els.repoLink.hidden=true;
   const repo=state.selectedRepo; const included=includedLocalFiles();
+  const projectName=(selectedLocalFiles[0]?.webkitRelativePath||'').split('/')[0]||els.folderName.textContent||'project';
   if(!repo) return showNotice(els.uploadNotice,'Select a repository first.','error');
   if(!canWrite(repo)) return showNotice(els.uploadNotice,'This token has read-only access to the selected repository.','error');
   if(!included.length) return showNotice(els.uploadNotice,'Select a folder with at least one included file.','error');
@@ -342,6 +255,7 @@ async function uploadProject(event) {
     const current=await githubRequest(repositoryPath);
     if(current.permissions?.push===false) throw new Error('GitHub confirms that your token cannot push to this repository.');
     let branch=getDefaultBranch(repo); const base=`${repositoryPath}/git`;
+    const replaceMode=document.querySelector('input[name="uploadMode"]:checked')?.value==='replace';
     let ref=null;
     try { ref=await githubRequest(`${base}/ref/heads/${encodeBranch(branch)}`); }
     catch(error) { if(!/git repository is empty|repository is empty/i.test(error.message)) throw error; }
@@ -350,14 +264,14 @@ async function uploadProject(event) {
     // commit. Bootstrap the default branch via the Contents API, then use Git
     // Trees/Commits for the rest of the upload. Existing repos still get one commit.
     let remaining=included;
-    let parentSha=null,baseTree=null;
+    let parentSha=null,baseTree=null,replaceDeletes=[];
     if(!ref) {
       const first=included[0];
       els.uploadStatus.textContent='Starting the empty repository…';
       setProgress(4,'Creating the first repository commit');
       const bytes=new Uint8Array(await first.file.arrayBuffer());
       await githubRequest(`${repositoryPath}/contents/${encodeRepoPath(first.path)}`,{
-        method:'PUT',body:jsonBody({message:`Initialize repository with ${first.path}`,content:fileBase64(bytes)})
+        method:'PUT',body:jsonBody({message:`Initialize ${projectName} with ${first.path}`,content:fileBase64(bytes)})
       });
       bootstrappedPath=first.path;
       const updatedRepo=await githubRequest(repositoryPath);
@@ -372,6 +286,14 @@ async function uploadProject(event) {
       parentSha=ref.object.sha;
       const parentCommit=await githubRequest(`${base}/commits/${parentSha}`);
       baseTree=parentCommit.tree.sha;
+      if(replaceMode) {
+        const currentTree=await githubRequest(`${base}/trees/${baseTree}?recursive=1`);
+        if(currentTree.truncated)throw new Error('GitHub truncated this repository tree; replace mode cannot safely determine all files to remove.');
+        const desired=new Set(included.map(item=>item.path));
+        replaceDeletes=(currentTree.tree||[]).filter(item=>item.type==='blob'&&!desired.has(item.path)).map(item=>({path:item.path,mode:item.mode||'100644',type:'blob',sha:null}));
+        const confirm=window.confirm(`Replace all tracked contents of ${repo.full_name} with this folder? ${replaceDeletes.length} existing file(s) will be removed. This cannot be undone without another commit.`);
+        if(!confirm){showNotice(els.uploadNotice,'Replacement cancelled. No repository changes were made.','info');return;}
+      }
     }
 
     els.uploadStatus.textContent=`Uploading ${included.length} ${included.length===1?'file':'files'}…`;
@@ -381,10 +303,11 @@ async function uploadProject(event) {
         const blob=await githubRequest(`${base}/blobs`,{method:'POST',body:jsonBody({content:fileBase64(bytes),encoding:'base64'})});
         return blob.sha;
       },(done,total)=>setProgress(8+done/total*76,`Uploading file data · ${done} of ${total}`));
-      const treeBody={base_tree:baseTree,tree:remaining.map(({path,sha})=>({path,mode:'100644',type:'blob',sha}))};
+      const treeBody={base_tree:baseTree,tree:[...replaceDeletes,...remaining.map(({path,sha})=>({path,mode:'100644',type:'blob',sha}))]};
       setProgress(88,'Creating a single commit for remaining files');
       const tree=await githubRequest(`${base}/trees`,{method:'POST',body:jsonBody(treeBody)});
-      const commit=await githubRequest(`${base}/commits`,{method:'POST',body:jsonBody({message:`Upload remaining project files (${remaining.length})`,tree:tree.sha,parents:[parentSha]})});
+      const commitMessage=replaceMode?`Replace ${repo.name} with ${projectName} (${included.length} files)`:`Upload ${projectName} (${remaining.length} files)`;
+      const commit=await githubRequest(`${base}/commits`,{method:'POST',body:jsonBody({message:commitMessage,tree:tree.sha,parents:[parentSha]})});
       setProgress(96,'Updating repository branch');
       await githubRequest(`${base}/refs/heads/${encodeBranch(branch)}`,{method:'PATCH',body:jsonBody({sha:commit.sha,force:false})});
     }
@@ -392,7 +315,7 @@ async function uploadProject(event) {
     els.uploadStatus.textContent='Your project is now on GitHub.';
     const commitInfo=bootstrappedPath
       ? (remaining.length ? 'The empty repository was initialized first, then the remaining files were added in a follow-up commit.' : 'The empty repository was initialized with its first commit.')
-      : 'All files were uploaded in one commit; existing repository files were preserved.';
+      : replaceMode ? `Repository contents replaced in one commit (${replaceDeletes.length} old files removed).` : 'All files were uploaded in one commit; existing repository files were preserved.';
     showNotice(els.uploadNotice,`Uploaded ${included.length} ${included.length===1?'file':'files'} to ${repo.full_name}. ${commitInfo}`,'success');
     els.repoLink.href=`${repo.html_url}/tree/${branch.split('/').map(encodeURIComponent).join('/')}`; els.repoLink.hidden=false;
     state.files=[]; if(document.querySelector('[data-page-panel="manager"]').classList.contains('active')) await refreshContents();
@@ -442,7 +365,10 @@ function renderBreadcrumbs() {
 function formatSize(size) {if(!size)return '—';if(size<1024)return `${size} B`;if(size<1024*1024)return `${(size/1024).toFixed(1)} KB`;return `${(size/1024/1024).toFixed(1)} MB`;}
 function renderFileList() {
   els.fileList.replaceChildren();renderBreadcrumbs();
-  const {folders,files}=directEntries(state.currentDir);const visibleCount=folders.length+files.length;
+  let {folders,files}=directEntries(state.currentDir);
+  const query=(els.fileSearch?.value||'').trim().toLowerCase();
+  if(query){folders=[];files=state.files.filter(file=>file.path.toLowerCase().includes(query));}
+  const visibleCount=folders.length+files.length;
   els.visibleCount.textContent=`${visibleCount} item${visibleCount===1?'':'s'}`;
   els.emptyState.hidden=visibleCount!==0;
   els.selectVisible.checked=files.length>0&&files.every(file=>state.selectedPaths.has(file.path));
@@ -461,7 +387,7 @@ function renderFileList() {
     const glyph=document.createElement('span');glyph.className='file-symbol';glyph.textContent='▤';item.append(check,glyph);
     item.append(makeButton(file.path.split('/').pop(),'file-name-button',()=>previewFile(file),`Preview ${file.path}`));
     const size=document.createElement('span');size.className='file-size';size.textContent=formatSize(file.size);
-    const actions=document.createElement('div');actions.className='file-actions';actions.append(makeButton('Move / rename','text-action',()=>moveFile(file),`Move or rename ${file.path}`),makeButton('Delete','text-action danger',()=>deletePaths([file.path],`Delete “${file.path}”?`),'Delete file'));
+    const actions=document.createElement('div');actions.className='file-actions';actions.append(makeButton('Edit','text-action',()=>previewFile(file),`Edit ${file.path}`),makeButton('Move / rename','text-action',()=>moveFile(file),`Move or rename ${file.path}`),makeButton('Delete','text-action danger',()=>deletePaths([file.path],`Delete “${file.path}”?`),'Delete file'));
     row.append(item,size,actions);els.fileList.append(row);
   }
   updateSelectedCount();updateSelectedRepoUI();
@@ -469,15 +395,64 @@ function renderFileList() {
 function renderSelectAllState(files=directEntries(state.currentDir).files){els.selectVisible.checked=files.length>0&&files.every(file=>state.selectedPaths.has(file.path));els.selectVisible.indeterminate=files.some(file=>state.selectedPaths.has(file.path))&&!els.selectVisible.checked;}
 function updateSelectedCount(){els.selectedCount.textContent=state.selectedPaths.size?`(${state.selectedPaths.size})`:'';els.deleteSelected.disabled=!canWrite()||state.selectedPaths.size===0||state.busy;}
 async function previewFile(file) {
-  els.filePreviewPanel.hidden=false;els.previewTitle.textContent=file.path;els.previewContent.textContent='Loading preview…';
+  els.filePreviewPanel.hidden=false;els.previewTitle.textContent=file.path;els.previewContent.value='Loading…';
+  state.editorPath=file.path;state.editorSha=file.sha;els.saveFileEdit.disabled=!canWrite();els.editorStatus.textContent='Text files under 1 MB can be edited and saved as a GitHub commit.';
   try {
-    if(file.size>1024*1024){els.previewContent.textContent='Preview is limited to files under 1 MB. Use GitHub to view this larger file.';return;}
-    const encoded=file.path.split('/').map(encodeURIComponent).join('/');const data=await githubRequest(`${apiRepoPath()}/contents/${encoded}?ref=${encodeURIComponent(getDefaultBranch())}`);
-    if(data.encoding!=='base64'||!data.content){els.previewContent.textContent='This file cannot be previewed as text.';return;}
+    if(file.size>1024*1024){els.previewContent.value='';els.editorStatus.textContent='Preview/edit is limited to files under 1 MB. Open this file on GitHub instead.';els.saveFileEdit.disabled=true;return;}
+    const data=await githubRequest(`${apiRepoPath()}/contents/${encodeRepoPath(file.path)}?ref=${encodeURIComponent(getDefaultBranch())}`);
+    if(data.encoding!=='base64'||!data.content){els.previewContent.value='';els.editorStatus.textContent='This file cannot be edited as text.';els.saveFileEdit.disabled=true;return;}
     const binary=atob(data.content.replace(/\n/g,''));const bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));
-    try{els.previewContent.textContent=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{els.previewContent.textContent='Binary or non-UTF-8 file. Preview is unavailable.';}
-  }catch(error){els.previewContent.textContent=error.message;}
+    try{els.previewContent.value=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{els.previewContent.value='';els.editorStatus.textContent='Binary or non-UTF-8 file. Editing is unavailable.';els.saveFileEdit.disabled=true;}
+  }catch(error){els.previewContent.value='';els.editorStatus.textContent=error.message;els.saveFileEdit.disabled=true;}
 }
+async function saveEditedFile() {
+  if(!state.editorPath||!canWrite())return;
+  const path=state.editorPath;els.saveFileEdit.disabled=true;els.editorStatus.textContent='Saving a Git commit…';
+  try{
+    const bytes=new TextEncoder().encode(els.previewContent.value);
+    const blob=await githubRequest(`${apiRepoPath()}/git/blobs`,{method:'POST',body:jsonBody({content:fileBase64(bytes),encoding:'base64'})});
+    await makeCommit([{path,mode:'100644',type:'blob',sha:blob.sha}],`Edit ${path}`);
+    els.editorStatus.textContent='Saved to GitHub.';showNotice(els.managerNotice,`Saved changes to ${path}.`,'success');await refreshContents();
+  }catch(error){els.editorStatus.textContent=error.message;showNotice(els.managerNotice,error.message,'error');}
+  finally{els.saveFileEdit.disabled=!canWrite();}
+}
+async function createFile() {
+  if(!canWrite())return showNotice(els.managerNotice,'Select a repository with write access first.','error');
+  const path=window.prompt('New file path (for example, docs/notes.md):');if(path===null)return;
+  const clean=path.trim().replace(/^\/+/, '');if(!clean||clean.split('/').some(part=>!part||part==='.'||part==='..'))return showNotice(els.managerNotice,'Enter a valid relative file path.','error');
+  if(state.files.some(file=>file.path===clean)&&!window.confirm(`“${clean}” already exists. Replace its current contents?`))return;
+  const content=window.prompt('Enter the new file content:','');if(content===null)return;
+  try{
+    const branch=getDefaultBranch();let ref;
+    try{ref=await githubRequest(repoBranchRefPath());}catch(error){if(!/git repository is empty|repository is empty/i.test(error.message))throw error;}
+    if(!ref){await githubRequest(`${apiRepoPath()}/contents/${encodeRepoPath(clean)}`,{method:'PUT',body:jsonBody({message:`Create ${clean}`,content:fileBase64(new TextEncoder().encode(content))})});}
+    else{const blob=await githubRequest(`${apiRepoPath()}/git/blobs`,{method:'POST',body:jsonBody({content:fileBase64(new TextEncoder().encode(content)),encoding:'base64'})});await makeCommit([{path:clean,mode:'100644',type:'blob',sha:blob.sha}],`Create ${clean}`);}
+    showNotice(els.managerNotice,`Created ${clean}.`,'success');await refreshContents();
+  }catch(error){showNotice(els.managerNotice,error.message,'error');}
+}
+async function refreshHistory() {
+  if(!state.selectedRepo){els.historySummary.textContent='Select a repository to load its history.';els.historyList.replaceChildren();return;}
+  els.historySummary.textContent=`Loading recent commits for ${state.selectedRepo.full_name}…`;els.historyList.replaceChildren();els.historyEmpty.hidden=true;
+  try{
+    const commits=await githubRequest(`${apiRepoPath()}/commits?per_page=50`);
+    els.historySummary.textContent=`${commits.length} recent commit${commits.length===1?'':'s'} · ${state.selectedRepo.full_name}`;
+    els.historyEmpty.hidden=commits.length!==0;
+    for(const item of commits){
+      const card=document.createElement('article');card.className='history-item';
+      const icon=document.createElement('span');icon.className='history-icon';icon.textContent='↗';
+      const info=document.createElement('div');info.className='history-info';
+      const title=document.createElement('strong');title.textContent=(item.commit.message||'Repository update').split('\n')[0];
+      const meta=document.createElement('span');const who=item.commit.author?.name||item.author?.login||'GitHub user';const when=item.commit.author?.date?new Date(item.commit.author.date).toLocaleString():'Date unavailable';meta.textContent=`${who} · ${when}`;
+      const sha=document.createElement('code');sha.textContent=item.sha.slice(0,7);
+      const link=document.createElement('a');link.href=item.html_url;link.target='_blank';link.rel='noopener noreferrer';link.textContent='View commit ↗';
+      info.append(title,meta);card.append(icon,info,sha,link);els.historyList.append(card);
+    }
+  }catch(error){
+    if(/git repository is empty|repository is empty/i.test(error.message)){els.historySummary.textContent=`No commits yet · ${state.selectedRepo.full_name}`;els.historyEmpty.hidden=false;}
+    else els.historySummary.textContent=error.message;
+  }
+}
+
 async function makeCommit(changes,message) {
   const repo=state.selectedRepo;if(!repo)throw new Error('Select a repository first.');if(!canWrite(repo))throw new Error('This token has read-only access to the selected repository.');
   const base=apiRepoPath(repo);const branch=getDefaultBranch(repo);const ref=await githubRequest(`${base}/git/ref/heads/${encodeBranch(branch)}`);const parentSha=ref.object.sha;
@@ -528,15 +503,15 @@ function fillSettingsForm() {
   els.settingsToken.value=state.credentials.token||'';
   els.settingsOpenai.value=state.credentials.openaiKey||'';
   els.saveSettings.textContent=state.credentials.token?'Update settings':'Save settings';
-  setSettingsStatus(state.credentials.token?'Credentials are encrypted and saved in this browser.':'Credentials have not been saved yet.');
+  setSettingsStatus(state.credentials.token?'Credentials loaded from your OS keychain.':'Add credentials and save them to your OS keychain.');
 }
 async function saveSettings(event) {
-  event.preventDefault();if(!state.key)return;
+  event.preventDefault();
   const username=els.settingsUsername.value.trim();const token=els.settingsToken.value.trim();const openaiKey=els.settingsOpenai.value.trim();
   if(!username||!token)return setSettingsStatus('GitHub username and token are required.','error');
-  const next={...state.credentials,username,token,openaiKey};
-  try{await saveEncryptedSettings(next);state.credentials=next;setSettingsStatus('Settings encrypted and saved on this device.','success');els.saveSettings.textContent='Update settings';await refreshRepositories();}
-  catch(error){setSettingsStatus(`Could not save settings: ${error.message}`,'error');}
+  const next={username,token,openaiKey};
+  try{await saveKeychainCredentials(next);state.credentials=next;setSettingsStatus('Credentials saved in your computer’s OS keychain.','success');els.saveSettings.textContent='Update settings';await refreshRepositories();}
+  catch(error){setSettingsStatus(`Could not save to OS keychain: ${error.message}`,'error');}
 }
 async function testConnection() {
   const enteredToken=els.settingsToken.value.trim()||state.credentials.token;const enteredUsername=els.settingsUsername.value.trim()||state.credentials.username;
@@ -548,10 +523,8 @@ async function testConnection() {
   finally{state.credentials=previous;els.testConnection.disabled=false;}
 }
 async function clearCredentials() {
-  if(!state.key)return;
-  if(!window.confirm('Clear the saved GitHub username, token, and OpenAI key from this encrypted vault?'))return;
-  const empty={username:'',token:'',openaiKey:'',selectedRepo:''};
-  try{await saveEncryptedSettings(empty);state.credentials=empty;state.repos=[];state.selectedRepo=null;state.files=[];state.selectedPaths.clear();els.connectionBadge.classList.add('offline');els.connectionBadge.querySelector('span').textContent='Credentials needed';fillSettingsForm();renderRepoOptions('Set up GitHub credentials in Settings');goPage('settings');setSettingsStatus('Saved credentials were cleared from the vault.','success');}
+  if(!window.confirm('Remove the saved GitHub username, token, and OpenAI key from your OS keychain?'))return;
+  try{await keychainRequest('/api/credentials',{method:'DELETE'});state.credentials={username:'',token:'',openaiKey:''};state.repos=[];state.selectedRepo=null;state.files=[];state.selectedPaths.clear();els.connectionBadge.classList.add('offline');els.connectionBadge.querySelector('span').textContent='Setup needed';fillSettingsForm();renderRepoOptions('Set up GitHub credentials in Settings');goPage('settings');setSettingsStatus('Credentials removed from the OS keychain.','success');}
   catch(error){setSettingsStatus(`Could not clear credentials: ${error.message}`,'error');}
 }
 async function suggestExclusions() {
@@ -573,27 +546,20 @@ async function suggestExclusions() {
 }
 
 // ---- UI events ----
-els.vaultForm.addEventListener('submit',async event=>{
-  event.preventDefault();clearNotice(els.vaultNotice);
-  const pass=els.vaultPassword.value;
-  if(pass.length<10)return showNotice(els.vaultNotice,'Use a vault passphrase with at least 10 characters.','error');
-  try{
-    if(state.vaultExists){const record=await readVaultRecord();await unlockVault(pass,record);}
-    else{if(pass!==els.vaultConfirm.value)return showNotice(els.vaultNotice,'The passphrases do not match.','error');await createVault(pass);}
-  }catch(error){state.key=null;showNotice(els.vaultNotice,state.vaultExists?'Passphrase incorrect or vault data is damaged. Your credentials were not changed.':error.message,'error');}
-});
 document.querySelectorAll('.nav-link').forEach(button=>button.addEventListener('click',()=>goPage(button.dataset.page)));
 document.querySelectorAll('[data-page-link]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault();goPage(link.dataset.pageLink);}));
-els.lockButton.addEventListener('click',lockVault);els.footerLock.addEventListener('click',lockVault);
 els.settingsForm.addEventListener('submit',saveSettings);els.testConnection.addEventListener('click',testConnection);els.clearCredentials.addEventListener('click',clearCredentials);
 document.querySelectorAll('[data-toggle-secret]').forEach(button=>button.addEventListener('click',()=>{const input=document.getElementById(button.dataset.toggleSecret);const show=input.type==='password';input.type=show?'text':'password';button.textContent=show?'Hide':'Show';}));
 els.refreshRepos.addEventListener('click',()=>refreshRepositories());
-els.repoSelect.addEventListener('change',()=>{
-  state.selectedRepo=state.repos.find(repo=>repo.full_name===els.repoSelect.value)||null;
+document.querySelectorAll('[data-refresh-repos]').forEach(button=>button.addEventListener('click',()=>refreshRepositories()));
+document.querySelectorAll('[data-go]').forEach(button=>button.addEventListener('click',()=>{if(button.dataset.replace==='true'){const radio=document.querySelector('input[name=uploadMode][value=replace]');if(radio)radio.checked=true;}goPage(button.dataset.go);}));
+[els.repoSelect,els.repoSelectUpload].filter(Boolean).forEach(select=>select.addEventListener('change',()=>{
+  state.selectedRepo=state.repos.find(repo=>repo.full_name===select.value)||null;
   state.credentials.selectedRepo=state.selectedRepo?.full_name||'';state.files=[];state.currentDir='';state.selectedPaths.clear();els.filePreviewPanel.hidden=true;
   updateSelectedRepoUI();if(state.selectedRepo&&document.querySelector('[data-page-panel="manager"]').classList.contains('active'))refreshContents();
-  if(state.key)saveEncryptedSettings(state.credentials).catch(()=>{});
-});
+  if(state.selectedRepo&&document.querySelector('[data-page-panel="history"]').classList.contains('active'))refreshHistory();
+  try{if(state.selectedRepo)localStorage.setItem('selectedRepo',state.selectedRepo.full_name);}catch{}
+}));
 els.chooseFolder.addEventListener('click',()=>els.folderInput.click());
 els.folderInput.addEventListener('change',()=>{
   selectedLocalFiles=Array.from(els.folderInput.files||[]);const path=selectedLocalFiles[0]?.webkitRelativePath||'';
@@ -602,7 +568,11 @@ els.folderInput.addEventListener('change',()=>{
 });
 els.excludePatterns.addEventListener('input',updateLocalSelection);els.uploadForm.addEventListener('submit',uploadProject);document.getElementById('suggestButton').addEventListener('click',suggestExclusions);
 els.refreshContents.addEventListener('click',refreshContents);
-els.selectVisible.addEventListener('change',()=>{const {files}=directEntries(state.currentDir);files.forEach(file=>els.selectVisible.checked?state.selectedPaths.add(file.path):state.selectedPaths.delete(file.path));renderFileList();});
+els.refreshHistory.addEventListener('click',refreshHistory);
+els.fileSearch.addEventListener('input',renderFileList);
+els.createFile.addEventListener('click',createFile);
+els.saveFileEdit.addEventListener('click',saveEditedFile);
+els.selectVisible.addEventListener('change',()=>{const query=(els.fileSearch.value||'').trim().toLowerCase();const files=query?state.files.filter(file=>file.path.toLowerCase().includes(query)):directEntries(state.currentDir).files;files.forEach(file=>els.selectVisible.checked?state.selectedPaths.add(file.path):state.selectedPaths.delete(file.path));renderFileList();});
 els.deleteSelected.addEventListener('click',()=>deletePaths([...state.selectedPaths],`Delete ${state.selectedPaths.size} selected file${state.selectedPaths.size===1?'':'s'} from ${state.selectedRepo?.full_name}?`));
 els.deleteAll.addEventListener('click',deleteAllContents);els.closePreview.addEventListener('click',()=>{els.filePreviewPanel.hidden=true;});
 
