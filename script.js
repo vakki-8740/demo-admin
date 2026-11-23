@@ -3,17 +3,18 @@
 // Static-hosted app: session credentials live in JavaScript memory only.
 // GitHub/OpenAI requests go directly from this browser.
 const API_ROOT = 'https://api.github.com';
+const DB_NAME='github-manager-vault';const DB_STORE='encrypted-settings';const VAULT_ID='main';const KDF_ITERATIONS=310000;
 const MAX_FILE_BYTES = 95 * 1024 * 1024;
 const MAX_TREE_ENTRIES = 100000;
 const els = Object.fromEntries([
-  'app','loginScreen','loginForm','loginUsername','loginToken','loginOpenai','loginNotice','loginButton','logoutButton','repoSelect','refreshRepos','uploadPermission','folderInput','chooseFolder','folderName','folderSummary','fileCount','excludedCount','excludePatterns','uploadForm','uploadButton','uploadStatus','uploadProgress','progressLabel','progressPercent','progressBar','uploadNotice','repoLink','suggestButton',
+  'app','loginScreen','loginForm','loginPassword','loginConfirm','vaultTitle','vaultDescription','vaultConfirmField','loginNotice','loginButton','logoutButton','repoSelect','refreshRepos','uploadPermission','folderInput','chooseFolder','folderName','folderSummary','fileCount','excludedCount','excludePatterns','uploadForm','uploadButton','uploadStatus','uploadProgress','progressLabel','progressPercent','progressBar','uploadNotice','repoLink','suggestButton',
   'connectionBadge','settingsForm','settingsUsername','settingsToken','settingsOpenai','settingsStatus','saveSettings','testConnection','clearCredentials','managerMessage','managerNotice','fileList','emptyState','visibleCount','selectVisible','deleteSelected','selectedCount','deleteAll','breadcrumbs','refreshContents','filePreviewPanel','previewTitle','previewContent','closePreview'
 ].map(id => [id, document.getElementById(id)]));
 Object.assign(els, Object.fromEntries([
   'repoSelectUpload','uploadPermissionMirror','homeNotice','fileSearch','createFile','refreshHistory','historySummary','historyList','historyEmpty','saveFileEdit','editorStatus','uploadModeReplace'
 ].map(id => [id, document.getElementById(id)])));
 const state = {
-  credentials: { username: '', token: '', openaiKey: '' }, repos: [], selectedRepo: null,
+  db:null,key:null,vaultExists:false,credentials: { username: '', token: '', openaiKey: '' }, repos: [], selectedRepo: null,
   files: [], currentDir: '', selectedPaths: new Set(), busy: false,
   activityHistory: [], editorPath: null, editorSha: null
 };
@@ -55,45 +56,21 @@ function goPage(page) {
   if (page === 'history' && state.selectedRepo) refreshHistory();
 }
 
-// ---- Session-only auth for static hosting (Vercel/local HTML) ----
-function initializeVault() {
-  els.loginScreen.hidden = false;
-  els.app.hidden = true;
-  els.loginButton.disabled = false;
-}
-function enterApp() {
-  els.loginScreen.hidden = true;
-  els.app.hidden = false;
-  fillSettingsForm();
-  refreshRepositories();
-}
-async function signIn(event) {
-  event.preventDefault();
-  const username=els.loginUsername.value.trim();
-  const token=els.loginToken.value.trim();
-  const openaiKey=els.loginOpenai.value.trim();
-  if(!username||!token)return showNotice(els.loginNotice,'Enter your GitHub username and personal access token.','error');
-  els.loginButton.disabled=true;els.loginButton.textContent='Connecting…';clearNotice(els.loginNotice);
-  state.credentials={username,token,openaiKey};
-  try{
-    const user=await getUser();
-    if(user.login.toLowerCase()!==username.toLowerCase())throw new Error(`This token belongs to “${user.login}”, not “${username}”.`);
-    els.connectionBadge.classList.remove('offline');
-    els.connectionBadge.querySelector('span').textContent=`Connected as ${user.login}`;
-    enterApp();
-  }catch(error){
-    state.credentials={username:'',token:'',openaiKey:''};
-    showNotice(els.loginNotice,error.message,'error');
-  }finally{els.loginButton.disabled=false;els.loginButton.replaceChildren(iconNode('github'),document.createTextNode('Connect to GitHub'));}
-}
-function signOut() {
-  state.credentials={username:'',token:'',openaiKey:''};state.repos=[];state.selectedRepo=null;state.files=[];state.selectedPaths.clear();
-  els.settingsUsername.value='';els.settingsToken.value='';els.settingsOpenai.value='';
-  els.loginToken.value='';els.loginOpenai.value='';
-  els.app.hidden=true;els.loginScreen.hidden=false;
-  els.connectionBadge.classList.add('offline');els.connectionBadge.querySelector('span').textContent='Not connected';
-  setSettingsStatus('Credentials are only held for a session.');els.loginUsername.focus();
-}
+// ---- Passphrase-unlocked, encrypted browser vault (works on Vercel HTTPS) ----
+function openDatabase(){return new Promise((resolve,reject)=>{const req=indexedDB.open(DB_NAME,1);req.onupgradeneeded=()=>req.result.createObjectStore(DB_STORE,{keyPath:'id'});req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error||new Error('Could not open browser vault storage.'));});}
+function readVaultRecord(){return new Promise((resolve,reject)=>{const req=state.db.transaction(DB_STORE,'readonly').objectStore(DB_STORE).get(VAULT_ID);req.onsuccess=()=>resolve(req.result||null);req.onerror=()=>reject(req.error||new Error('Could not read the vault.'));});}
+function writeVaultRecord(record){return new Promise((resolve,reject)=>{const tx=state.db.transaction(DB_STORE,'readwrite');tx.objectStore(DB_STORE).put(record);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error||new Error('Could not save encrypted credentials.'));tx.onabort=()=>reject(tx.error||new Error('Vault update was cancelled.'));});}
+function bytesToB64(bytes){let s='';for(let i=0;i<bytes.length;i+=0x8000)s+=String.fromCharCode(...bytes.subarray(i,i+0x8000));return btoa(s);}
+function b64ToBytes(value){return Uint8Array.from(atob(value),c=>c.charCodeAt(0));}
+async function deriveVaultKey(passphrase,salt,iterations=KDF_ITERATIONS){const material=await crypto.subtle.importKey('raw',new TextEncoder().encode(passphrase),'PBKDF2',false,['deriveKey']);return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations,hash:'SHA-256'},material,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);}
+async function saveEncryptedSettings(settings){if(!state.key)throw new Error('Unlock the vault before saving settings.');const prior=await readVaultRecord();if(!prior)throw new Error('Encrypted vault record is missing.');const iv=crypto.getRandomValues(new Uint8Array(12));const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},state.key,new TextEncoder().encode(JSON.stringify(settings)));await writeVaultRecord({id:VAULT_ID,version:1,iterations:prior.iterations||KDF_ITERATIONS,salt:prior.salt,iv:bytesToB64(iv),ciphertext:bytesToB64(new Uint8Array(cipher))});}
+function configureVaultScreen(exists){state.vaultExists=exists;els.vaultConfirmField.hidden=exists;els.vaultTitle.textContent=exists?'Unlock your vault':'Create your local vault';els.vaultDescription.textContent=exists?'Enter your vault passphrase. Your saved GitHub and OpenAI credentials will load automatically.':'Set a passphrase once. Your GitHub and optional OpenAI credentials will then be encrypted in this browser.';els.loginButton.textContent=exists?'Unlock vault':'Create encrypted vault';els.loginPassword.autocomplete=exists?'current-password':'new-password';}
+async function initializeVault(){els.loginScreen.hidden=false;els.app.hidden=true;if(!window.isSecureContext||!window.crypto?.subtle||!window.indexedDB){showNotice(els.loginNotice,'Browser encryption is unavailable here. Open the deployed app over HTTPS in a current browser.','error');els.loginButton.disabled=true;return;}try{state.db=await openDatabase();const record=await readVaultRecord();configureVaultScreen(Boolean(record));}catch(error){showNotice(els.loginNotice,error.message,'error');}}
+async function createVault(passphrase){const salt=crypto.getRandomValues(new Uint8Array(16));state.key=await deriveVaultKey(passphrase,salt);state.credentials={username:'',token:'',openaiKey:'',selectedRepo:''};const iv=crypto.getRandomValues(new Uint8Array(12));const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},state.key,new TextEncoder().encode(JSON.stringify(state.credentials)));await writeVaultRecord({id:VAULT_ID,version:1,iterations:KDF_ITERATIONS,salt:bytesToB64(salt),iv:bytesToB64(iv),ciphertext:bytesToB64(new Uint8Array(cipher))});state.vaultExists=true;enterApp();goPage('settings');}
+async function unlockVault(passphrase,record){const iterations=record.iterations||KDF_ITERATIONS;state.key=await deriveVaultKey(passphrase,b64ToBytes(record.salt),iterations);const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:b64ToBytes(record.iv)},state.key,b64ToBytes(record.ciphertext));state.credentials=JSON.parse(new TextDecoder().decode(plain));state.vaultExists=true;enterApp();}
+function enterApp(){els.loginScreen.hidden=true;els.app.hidden=false;els.loginPassword.value='';els.loginConfirm.value='';fillSettingsForm();if(state.credentials.token&&state.credentials.username){els.connectionBadge.querySelector('span').textContent='Connecting…';refreshRepositories();}else{els.connectionBadge.classList.add('offline');els.connectionBadge.querySelector('span').textContent='Setup needed';renderRepoOptions('Save GitHub credentials in Settings');goPage('settings');}}
+function signOut(){state.key=null;state.credentials={username:'',token:'',openaiKey:''};state.repos=[];state.selectedRepo=null;state.files=[];state.selectedPaths.clear();els.settingsUsername.value='';els.settingsToken.value='';els.settingsOpenai.value='';els.app.hidden=true;els.loginScreen.hidden=false;els.loginPassword.value='';els.loginConfirm.value='';els.connectionBadge.classList.add('offline');configureVaultScreen(true);els.loginPassword.focus();}
+async function submitVaultForm(event){event.preventDefault();clearNotice(els.loginNotice);const pass=els.loginPassword.value;if(pass.length<10)return showNotice(els.loginNotice,'Use a passphrase with at least 10 characters.','error');els.loginButton.disabled=true;try{if(state.vaultExists){const record=await readVaultRecord();await unlockVault(pass,record);}else{if(pass!==els.loginConfirm.value)return showNotice(els.loginNotice,'Passphrases do not match.','error');await createVault(pass);}}catch(error){state.key=null;showNotice(els.loginNotice,state.vaultExists?'That passphrase is incorrect or the vault is damaged.':'Could not create the vault: '+error.message,'error');}finally{els.loginButton.disabled=false;els.loginButton.textContent=state.vaultExists?'Unlock vault':'Create encrypted vault';}}
 
 // ---- GitHub REST API ----
 async function githubRequest(path, options = {}) {
@@ -151,7 +128,7 @@ async function fetchAllRepositories() {
 }
 function repoLabel(repo) { return `${repo.full_name}${repo.private ? ' · private' : ''}${canWrite(repo) ? '' : ' · read-only'}`; }
 function renderRepoOptions(placeholder = 'Select a repository…') {
-  const prior = localStorage.getItem('selectedRepo') || state.credentials.selectedRepo || state.selectedRepo?.full_name || '';
+  const prior = state.credentials.selectedRepo || localStorage.getItem('selectedRepo') || state.selectedRepo?.full_name || '';
   const selected = state.repos.find(repo => repo.full_name === prior) || state.repos.find(canWrite) || state.repos[0] || null;
   [els.repoSelect, els.repoSelectUpload].filter(Boolean).forEach(select => {
     select.replaceChildren();
@@ -161,7 +138,7 @@ function renderRepoOptions(placeholder = 'Select a repository…') {
     select.value = selected?.full_name || '';
   });
   state.selectedRepo = selected;
-  if (selected) { state.credentials.selectedRepo = selected.full_name; try {localStorage.setItem('selectedRepo',selected.full_name);} catch {} }
+  if (selected) { state.credentials.selectedRepo = selected.full_name; try {localStorage.setItem('selectedRepo',selected.full_name);} catch {} if(state.key)saveEncryptedSettings(state.credentials).catch(()=>{}); }
   updateSelectedRepoUI();
 }
 async function refreshRepositories() {
@@ -492,15 +469,15 @@ function fillSettingsForm() {
   els.settingsToken.value=state.credentials.token||'';
   els.settingsOpenai.value=state.credentials.openaiKey||'';
   els.saveSettings.textContent=state.credentials.token?'Update settings':'Save settings';
-  setSettingsStatus(state.credentials.token?'Credentials are active in this browser session only.':'No GitHub credentials are active.');
+  setSettingsStatus(state.credentials.token?'Credentials are encrypted in this browser vault.':'Add GitHub credentials and save them to the encrypted vault.');
 }
 async function saveSettings(event) {
   event.preventDefault();
   const username=els.settingsUsername.value.trim();const token=els.settingsToken.value.trim();const openaiKey=els.settingsOpenai.value.trim();
   if(!username||!token)return setSettingsStatus('GitHub username and token are required.','error');
-  state.credentials={username,token,openaiKey};
-  try{const user=await getUser();if(user.login.toLowerCase()!==username.toLowerCase())throw new Error(`This token belongs to “${user.login}”, not “${username}”.`);setSettingsStatus('Applied for this session. Credentials are not saved.','success');els.saveSettings.textContent='Applied';await refreshRepositories();}
-  catch(error){setSettingsStatus(error.message,'error');}
+  const previous=state.credentials;const next={...previous,username,token,openaiKey};state.credentials=next;
+  try{const user=await getUser();if(user.login.toLowerCase()!==username.toLowerCase())throw new Error(`This token belongs to “${user.login}”, not “${username}”.`);await saveEncryptedSettings(next);setSettingsStatus('Settings encrypted and saved in this browser.','success');els.saveSettings.textContent='Update settings';await refreshRepositories();}
+  catch(error){state.credentials=previous;setSettingsStatus(error.message,'error');}
 }
 async function testConnection() {
   const enteredToken=els.settingsToken.value.trim()||state.credentials.token;const enteredUsername=els.settingsUsername.value.trim()||state.credentials.username;
@@ -512,8 +489,10 @@ async function testConnection() {
   finally{state.credentials=previous;els.testConnection.disabled=false;}
 }
 async function clearCredentials() {
-  if(!window.confirm('Clear the current session credentials and return to sign-in?'))return;
-  signOut();
+  if(!window.confirm('Clear the saved GitHub and OpenAI credentials from this encrypted browser vault?'))return;
+  const empty={username:'',token:'',openaiKey:'',selectedRepo:''};
+  try{await saveEncryptedSettings(empty);state.credentials=empty;state.repos=[];state.selectedRepo=null;state.files=[];state.selectedPaths.clear();fillSettingsForm();renderRepoOptions('Set up credentials in Settings');els.connectionBadge.classList.add('offline');els.connectionBadge.querySelector('span').textContent='Setup needed';setSettingsStatus('Credentials cleared from the encrypted vault.','success');}
+  catch(error){setSettingsStatus(error.message,'error');}
 }
 async function suggestExclusions() {
   if(!state.credentials.openaiKey)return showNotice(els.uploadNotice,'Add an OpenAI API key in Settings to get exclusion suggestions. Upload works without it.','error');
@@ -534,7 +513,7 @@ async function suggestExclusions() {
 }
 
 // ---- UI events ----
-els.loginForm.addEventListener('submit',signIn);
+els.loginForm.addEventListener('submit',submitVaultForm);
 els.logoutButton.addEventListener('click',signOut);
 document.querySelectorAll('.nav-link').forEach(button=>button.addEventListener('click',()=>goPage(button.dataset.page)));
 document.querySelectorAll('[data-page-link]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault();goPage(link.dataset.pageLink);}));
