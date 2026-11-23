@@ -545,4 +545,18 @@ els.selectVisible.addEventListener('change',()=>{const query=(els.fileSearch.val
 els.deleteSelected.addEventListener('click',()=>deletePaths([...state.selectedPaths],`Delete ${state.selectedPaths.size} selected file${state.selectedPaths.size===1?'':'s'} from ${state.selectedRepo?.full_name}?`));
 els.deleteAll.addEventListener('click',deleteAllContents);els.closePreview.addEventListener('click',()=>{els.filePreviewPanel.hidden=true;});
 
+let deferredInstallPrompt=null;
+window.addEventListener('beforeinstallprompt',event=>{event.preventDefault();deferredInstallPrompt=event;});
+window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;document.querySelectorAll('[data-install-app]').forEach(button=>{button.innerHTML='<span class="io-icon io-check"></span>Installed';button.disabled=true;});});
+document.querySelectorAll('[data-install-app]').forEach(button=>button.addEventListener('click',async()=>{
+  if(deferredInstallPrompt){deferredInstallPrompt.prompt();const choice=await deferredInstallPrompt.userChoice;deferredInstallPrompt=null;if(choice.outcome==='accepted')return;}
+  const ua=navigator.userAgent;
+  let instructions='In Chrome or Edge, open the browser menu and choose Install app or Install this site as an app.';
+  if(/iPhone|iPad|iPod/i.test(ua))instructions='In Safari, tap Share, then Add to Home Screen.';
+  else if(/Macintosh/i.test(ua)&&/Safari/i.test(ua)&&!/Chrome|Chromium/i.test(ua))instructions='In Safari, choose File, then Add to Dock.';
+  const notice=els.loginScreen.hidden?els.homeNotice:els.loginNotice;
+  showNotice(notice,instructions,'info');
+}));
+if('serviceWorker' in navigator && (location.protocol==='https:' || location.hostname==='localhost'))navigator.serviceWorker.register('./service-worker.js').catch(()=>{});
+
 initializeVault();
