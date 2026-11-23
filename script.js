@@ -1,12 +1,12 @@
 'use strict';
 
-// Local desktop-style app: credentials are held by the Python OS-keychain
-// helper; GitHub/OpenAI requests go directly from this browser.
+// Static-hosted app: session credentials live in JavaScript memory only.
+// GitHub/OpenAI requests go directly from this browser.
 const API_ROOT = 'https://api.github.com';
 const MAX_FILE_BYTES = 95 * 1024 * 1024;
 const MAX_TREE_ENTRIES = 100000;
 const els = Object.fromEntries([
-  'app','repoSelect','refreshRepos','uploadPermission','folderInput','chooseFolder','folderName','folderSummary','fileCount','excludedCount','excludePatterns','uploadForm','uploadButton','uploadStatus','uploadProgress','progressLabel','progressPercent','progressBar','uploadNotice','repoLink','suggestButton',
+  'app','loginScreen','loginForm','loginUsername','loginToken','loginOpenai','loginNotice','loginButton','logoutButton','repoSelect','refreshRepos','uploadPermission','folderInput','chooseFolder','folderName','folderSummary','fileCount','excludedCount','excludePatterns','uploadForm','uploadButton','uploadStatus','uploadProgress','progressLabel','progressPercent','progressBar','uploadNotice','repoLink','suggestButton',
   'connectionBadge','settingsForm','settingsUsername','settingsToken','settingsOpenai','settingsStatus','saveSettings','testConnection','clearCredentials','managerMessage','managerNotice','fileList','emptyState','visibleCount','selectVisible','deleteSelected','selectedCount','deleteAll','breadcrumbs','refreshContents','filePreviewPanel','previewTitle','previewContent','closePreview'
 ].map(id => [id, document.getElementById(id)]));
 Object.assign(els, Object.fromEntries([
@@ -14,7 +14,7 @@ Object.assign(els, Object.fromEntries([
 ].map(id => [id, document.getElementById(id)])));
 const state = {
   credentials: { username: '', token: '', openaiKey: '' }, repos: [], selectedRepo: null,
-  files: [], currentDir: '', selectedPaths: new Set(), busy: false, keychainReady: false,
+  files: [], currentDir: '', selectedPaths: new Set(), busy: false,
   activityHistory: [], editorPath: null, editorSha: null
 };
 
@@ -55,56 +55,44 @@ function goPage(page) {
   if (page === 'history' && state.selectedRepo) refreshHistory();
 }
 
-// ---- OS keychain bridge. This app and helper share one localhost origin. ----
-async function keychainRequest(path, options = {}) {
-  let response;
-  try {
-    response = await fetch(path, {
-      ...options,
-      headers: { 'X-Local-App': 'GitHubManager', ...(options.body ? {'Content-Type':'application/json'} : {}), ...(options.headers||{}) }
-    });
-  } catch {
-    throw new Error('Local keychain helper is not running. Start it with python server.py and reopen http://localhost:8765.');
-  }
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `Local helper returned HTTP ${response.status}.`);
-  return data;
-}
-async function saveKeychainCredentials(credentials) {
-  await keychainRequest('/api/credentials', {method:'POST', body:JSON.stringify(credentials)});
-}
-async function initializeVault() {
-  els.app.hidden = false;
-  try {
-    const status = await keychainRequest('/api/status');
-    const result = await keychainRequest('/api/credentials');
-    state.credentials = result.credentials || {username:'',token:'',openaiKey:''};
-    state.keychainReady = Boolean(status.ok);
-    fillSettingsForm();
-    if (result.configured && state.credentials.token && state.credentials.username) {
-      els.connectionBadge.querySelector('span').textContent = 'Connecting…';
-      await refreshRepositories();
-      goPage('home');
-    } else {
-      els.connectionBadge.classList.add('offline');
-      els.connectionBadge.querySelector('span').textContent = 'Setup needed';
-      renderRepoOptions('Save GitHub credentials in Settings');
-      goPage('settings');
-      setSettingsStatus(`OS keychain ready (${status.keychain}). Add credentials and save once.`, 'success');
-    }
-  } catch (error) {
-    els.connectionBadge.classList.add('offline');
-    els.connectionBadge.querySelector('span').textContent = 'Keychain unavailable';
-    goPage('settings');
-    fillSettingsForm();
-    setSettingsStatus(error.message, 'error');
-  }
+// ---- Session-only auth for static hosting (Vercel/local HTML) ----
+function initializeVault() {
+  els.loginScreen.hidden = false;
+  els.app.hidden = true;
+  els.loginButton.disabled = false;
 }
 function enterApp() {
+  els.loginScreen.hidden = true;
   els.app.hidden = false;
   fillSettingsForm();
-  if (state.credentials.token && state.credentials.username) refreshRepositories();
-  else goPage('settings');
+  refreshRepositories();
+}
+async function signIn(event) {
+  event.preventDefault();
+  const username=els.loginUsername.value.trim();
+  const token=els.loginToken.value.trim();
+  const openaiKey=els.loginOpenai.value.trim();
+  if(!username||!token)return showNotice(els.loginNotice,'Enter your GitHub username and personal access token.','error');
+  els.loginButton.disabled=true;els.loginButton.textContent='Connecting…';clearNotice(els.loginNotice);
+  state.credentials={username,token,openaiKey};
+  try{
+    const user=await getUser();
+    if(user.login.toLowerCase()!==username.toLowerCase())throw new Error(`This token belongs to “${user.login}”, not “${username}”.`);
+    els.connectionBadge.classList.remove('offline');
+    els.connectionBadge.querySelector('span').textContent=`Connected as ${user.login}`;
+    enterApp();
+  }catch(error){
+    state.credentials={username:'',token:'',openaiKey:''};
+    showNotice(els.loginNotice,error.message,'error');
+  }finally{els.loginButton.disabled=false;els.loginButton.textContent='Connect to GitHub';}
+}
+function signOut() {
+  state.credentials={username:'',token:'',openaiKey:''};state.repos=[];state.selectedRepo=null;state.files=[];state.selectedPaths.clear();
+  els.settingsUsername.value='';els.settingsToken.value='';els.settingsOpenai.value='';
+  els.loginToken.value='';els.loginOpenai.value='';
+  els.app.hidden=true;els.loginScreen.hidden=false;
+  els.connectionBadge.classList.add('offline');els.connectionBadge.querySelector('span').textContent='Not connected';
+  setSettingsStatus('Credentials are only held for a session.');els.loginUsername.focus();
 }
 
 // ---- GitHub REST API ----
@@ -503,15 +491,15 @@ function fillSettingsForm() {
   els.settingsToken.value=state.credentials.token||'';
   els.settingsOpenai.value=state.credentials.openaiKey||'';
   els.saveSettings.textContent=state.credentials.token?'Update settings':'Save settings';
-  setSettingsStatus(state.credentials.token?'Credentials loaded from your OS keychain.':'Add credentials and save them to your OS keychain.');
+  setSettingsStatus(state.credentials.token?'Credentials are active in this browser session only.':'No GitHub credentials are active.');
 }
 async function saveSettings(event) {
   event.preventDefault();
   const username=els.settingsUsername.value.trim();const token=els.settingsToken.value.trim();const openaiKey=els.settingsOpenai.value.trim();
   if(!username||!token)return setSettingsStatus('GitHub username and token are required.','error');
-  const next={username,token,openaiKey};
-  try{await saveKeychainCredentials(next);state.credentials=next;setSettingsStatus('Credentials saved in your computer’s OS keychain.','success');els.saveSettings.textContent='Update settings';await refreshRepositories();}
-  catch(error){setSettingsStatus(`Could not save to OS keychain: ${error.message}`,'error');}
+  state.credentials={username,token,openaiKey};
+  try{const user=await getUser();if(user.login.toLowerCase()!==username.toLowerCase())throw new Error(`This token belongs to “${user.login}”, not “${username}”.`);setSettingsStatus('Applied for this session. Credentials are not saved.','success');els.saveSettings.textContent='Applied';await refreshRepositories();}
+  catch(error){setSettingsStatus(error.message,'error');}
 }
 async function testConnection() {
   const enteredToken=els.settingsToken.value.trim()||state.credentials.token;const enteredUsername=els.settingsUsername.value.trim()||state.credentials.username;
@@ -523,9 +511,8 @@ async function testConnection() {
   finally{state.credentials=previous;els.testConnection.disabled=false;}
 }
 async function clearCredentials() {
-  if(!window.confirm('Remove the saved GitHub username, token, and OpenAI key from your OS keychain?'))return;
-  try{await keychainRequest('/api/credentials',{method:'DELETE'});state.credentials={username:'',token:'',openaiKey:''};state.repos=[];state.selectedRepo=null;state.files=[];state.selectedPaths.clear();els.connectionBadge.classList.add('offline');els.connectionBadge.querySelector('span').textContent='Setup needed';fillSettingsForm();renderRepoOptions('Set up GitHub credentials in Settings');goPage('settings');setSettingsStatus('Credentials removed from the OS keychain.','success');}
-  catch(error){setSettingsStatus(`Could not clear credentials: ${error.message}`,'error');}
+  if(!window.confirm('Clear the current session credentials and return to sign-in?'))return;
+  signOut();
 }
 async function suggestExclusions() {
   if(!state.credentials.openaiKey)return showNotice(els.uploadNotice,'Add an OpenAI API key in Settings to get exclusion suggestions. Upload works without it.','error');
@@ -546,6 +533,8 @@ async function suggestExclusions() {
 }
 
 // ---- UI events ----
+els.loginForm.addEventListener('submit',signIn);
+els.logoutButton.addEventListener('click',signOut);
 document.querySelectorAll('.nav-link').forEach(button=>button.addEventListener('click',()=>goPage(button.dataset.page)));
 document.querySelectorAll('[data-page-link]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault();goPage(link.dataset.pageLink);}));
 els.settingsForm.addEventListener('submit',saveSettings);els.testConnection.addEventListener('click',testConnection);els.clearCredentials.addEventListener('click',clearCredentials);

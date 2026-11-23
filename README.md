@@ -1,30 +1,13 @@
 # GitHub Project Manager
 
-Desktop-first, light iOS-inspired GitHub uploader and repository manager. Frontend remains HTML/CSS/vanilla JS. A small local Python helper serves the UI and stores GitHub/OpenAI credentials in the operating system keychain so the app can auto-load them without an in-app unlock prompt.
+Static desktop-first HTML/CSS/vanilla-JavaScript app for Vercel or any static host. It connects directly from the browser to GitHub and (optionally) OpenAI. No backend or separate server is required.
 
-## First run
+## Credentials and session privacy
 
-1. Install Python 3.10 or newer.
-2. Open a terminal in this folder and install the one local keychain dependency:
+Enter your GitHub username and personal access token on the sign-in page each time you open/reload the app. Credentials are held in JavaScript memory for that browser session only; they are not written to localStorage, sent to this project's GitHub repository, or persisted by the app. Signing out or reloading clears them. The OpenAI API key is optional and also session-only.
 
-   ```sh
-   python -m pip install -r requirements.txt
-   ```
+## Deploy
 
-3. Start the app:
+Deploy `index.html`, `style.css`, and `script.js` as static files on Vercel. Keep the three files in the same directory. Open the deployed URL, sign in, select a repository, then upload/manage files.
 
-   ```sh
-   python server.py
-   ```
-
-4. Open **http://localhost:8765**. Keep the terminal window running while using the app. Stop it with Ctrl+C.
-5. In Settings, save your GitHub username and PAT once. The helper stores them in Windows Credential Manager, macOS Keychain, or Linux Secret Service/KWallet; it does not write them into project files or browser storage.
-
-Use the same local app address each time. The GitHub token needs repository Contents read/write permission for upload and file edits. The OpenAI key is optional.
-
-## Notes
-
-- On Linux, a Secret Service/KWallet session must be available. The helper refuses to use an unprotected fallback keyring.
-- Uploading into an empty GitHub repository bootstraps its first file through GitHub's Contents API, then adds remaining files in a follow-up commit. Existing repositories are updated in one commit (or one replacement commit when replace mode is selected).
-- Repository history displays recent GitHub commits (up to 50), including work done outside this app.
-- Credentials are returned to the frontend only while the local app is open so the browser can send authorized requests directly to GitHub/OpenAI.
+Fine-grained GitHub PATs need access to the selected repository and Contents read/write permission for upload/edit/delete operations. Classic PATs generally need `repo` scope for private repositories. Keep tokens private and use an expiration date.
