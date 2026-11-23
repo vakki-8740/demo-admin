@@ -1,6 +1,6 @@
 'use strict';
 
-// Static-hosted app: session credentials live in JavaScript memory only.
+// Static-hosted app: encrypted vault credentials are unlocked locally in this browser.
 // GitHub/OpenAI requests go directly from this browser.
 const API_ROOT = 'https://api.github.com';
 const DB_NAME='github-manager-vault';const DB_STORE='encrypted-settings';const VAULT_ID='main';const KDF_ITERATIONS=310000;
@@ -8,10 +8,10 @@ const MAX_FILE_BYTES = 95 * 1024 * 1024;
 const MAX_TREE_ENTRIES = 100000;
 const els = Object.fromEntries([
   'app','loginScreen','loginForm','loginPassword','loginConfirm','vaultTitle','vaultDescription','vaultConfirmField','loginNotice','loginButton','logoutButton','repoSelect','refreshRepos','uploadPermission','folderInput','chooseFolder','folderName','folderSummary','fileCount','excludedCount','excludePatterns','uploadForm','uploadButton','uploadStatus','uploadProgress','progressLabel','progressPercent','progressBar','uploadNotice','repoLink','suggestButton',
-  'connectionBadge','settingsForm','settingsUsername','settingsToken','settingsOpenai','settingsStatus','saveSettings','testConnection','clearCredentials','managerMessage','managerNotice','fileList','emptyState','visibleCount','selectVisible','deleteSelected','selectedCount','deleteAll','breadcrumbs','refreshContents','filePreviewPanel','previewTitle','previewContent','closePreview'
+  'connectionBadge','repoSearch','settingsForm','settingsUsername','settingsToken','settingsOpenai','settingsStatus','saveSettings','testConnection','clearCredentials','managerMessage','managerNotice','fileList','emptyState','visibleCount','selectVisible','deleteSelected','selectedCount','deleteAll','breadcrumbs','refreshContents','filePreviewPanel','previewTitle','previewContent','closePreview'
 ].map(id => [id, document.getElementById(id)]));
 Object.assign(els, Object.fromEntries([
-  'repoSelectUpload','uploadPermissionMirror','homeNotice','fileSearch','createFile','refreshHistory','historySummary','historyList','historyEmpty','saveFileEdit','editorStatus','uploadModeReplace'
+  'repoSelectUpload','repoSearchUpload','uploadPermissionMirror','homeNotice','fileSearch','createFile','refreshHistory','historySummary','historyList','historyEmpty','saveFileEdit','editorStatus','uploadModeReplace'
 ].map(id => [id, document.getElementById(id)])));
 const state = {
   db:null,key:null,vaultExists:false,credentials: { username: '', token: '', openaiKey: '' }, repos: [], selectedRepo: null,
@@ -130,10 +130,15 @@ function repoLabel(repo) { return `${repo.full_name}${repo.private ? ' · privat
 function renderRepoOptions(placeholder = 'Select a repository…') {
   const prior = state.credentials.selectedRepo || localStorage.getItem('selectedRepo') || state.selectedRepo?.full_name || '';
   const selected = state.repos.find(repo => repo.full_name === prior) || state.repos.find(canWrite) || state.repos[0] || null;
+  const query = (els.repoSearch?.value || els.repoSearchUpload?.value || '').trim().toLocaleLowerCase();
+  const matches = state.repos.filter(repo => !query || [repo.full_name,repo.name,repo.description,repo.language].filter(Boolean).some(value => value.toLocaleLowerCase().includes(query)));
+  const visibleRepos = selected && !matches.some(repo => repo.full_name === selected.full_name) ? [selected,...matches] : matches;
   [els.repoSelect, els.repoSelectUpload].filter(Boolean).forEach(select => {
     select.replaceChildren();
-    const first = document.createElement('option'); first.value = ''; first.textContent = placeholder; select.append(first);
-    state.repos.forEach(repo => { const option=document.createElement('option');option.value=repo.full_name;option.textContent=repoLabel(repo);select.append(option); });
+    const first = document.createElement('option'); first.value = '';
+    first.textContent = query && !matches.length ? 'No repositories match this search' : placeholder;
+    select.append(first);
+    visibleRepos.forEach(repo => { const option=document.createElement('option');option.value=repo.full_name;option.textContent=repoLabel(repo);select.append(option); });
     select.disabled = !state.repos.length;
     select.value = selected?.full_name || '';
   });
@@ -141,6 +146,7 @@ function renderRepoOptions(placeholder = 'Select a repository…') {
   if (selected) { state.credentials.selectedRepo = selected.full_name; try {localStorage.setItem('selectedRepo',selected.full_name);} catch {} if(state.key)saveEncryptedSettings(state.credentials).catch(()=>{}); }
   updateSelectedRepoUI();
 }
+
 async function refreshRepositories() {
   if (!state.credentials.token) { renderRepoOptions('Set up GitHub credentials in Settings'); return; }
   els.refreshRepos.disabled = true;
@@ -519,6 +525,10 @@ document.querySelectorAll('.nav-link').forEach(button=>button.addEventListener('
 document.querySelectorAll('[data-page-link]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault();goPage(link.dataset.pageLink);}));
 els.settingsForm.addEventListener('submit',saveSettings);els.testConnection.addEventListener('click',testConnection);els.clearCredentials.addEventListener('click',clearCredentials);
 document.querySelectorAll('[data-toggle-secret]').forEach(button=>button.addEventListener('click',()=>{const input=document.getElementById(button.dataset.toggleSecret);const show=input.type==='password';input.type=show?'text':'password';button.replaceChildren(iconNode(show?'eye-closed':'eye'),document.createTextNode(show?' Hide':' Show'));}));
+[els.repoSearch,els.repoSearchUpload].filter(Boolean).forEach(input=>input.addEventListener('input',()=>{
+  [els.repoSearch,els.repoSearchUpload].filter(Boolean).forEach(other=>{if(other!==input)other.value=input.value;});
+  renderRepoOptions(state.repos.length?'Select a repository…':'Set up GitHub credentials in Settings');
+}));
 els.refreshRepos.addEventListener('click',()=>refreshRepositories());
 document.querySelectorAll('[data-refresh-repos]').forEach(button=>button.addEventListener('click',()=>refreshRepositories()));
 document.querySelectorAll('[data-go]').forEach(button=>button.addEventListener('click',()=>{if(button.dataset.replace==='true'){const radio=document.querySelector('input[name=uploadMode][value=replace]');if(radio)radio.checked=true;}goPage(button.dataset.go);}));
@@ -527,7 +537,7 @@ document.querySelectorAll('[data-go]').forEach(button=>button.addEventListener('
   state.credentials.selectedRepo=state.selectedRepo?.full_name||'';state.files=[];state.currentDir='';state.selectedPaths.clear();els.filePreviewPanel.hidden=true;
   updateSelectedRepoUI();if(state.selectedRepo&&document.querySelector('[data-page-panel="manager"]').classList.contains('active'))refreshContents();
   if(state.selectedRepo&&document.querySelector('[data-page-panel="history"]').classList.contains('active'))refreshHistory();
-  try{if(state.selectedRepo)localStorage.setItem('selectedRepo',state.selectedRepo.full_name);}catch{}
+  try{if(state.selectedRepo)localStorage.setItem('selectedRepo',state.selectedRepo.full_name);}catch{}if(state.selectedRepo&&state.key)saveEncryptedSettings(state.credentials).catch(()=>{});
 }));
 els.chooseFolder.addEventListener('click',()=>els.folderInput.click());
 els.folderInput.addEventListener('change',()=>{

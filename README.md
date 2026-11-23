@@ -8,7 +8,7 @@ Deploy the files below to the root of your Vercel project. Open the deployed HTT
 
 ## Vault and credentials
 
-On first use, create a vault passphrase (10+ characters), then add the GitHub username/PAT and optional OpenAI key in Settings. Credentials are encrypted with Web Crypto AES-GCM and saved in this browser's IndexedDB. When reopening the installed app, enter only the vault passphrase; repository selection and credentials load automatically. The passphrase itself is never saved. If forgotten, the encrypted vault cannot be recovered. Use the same browser and deployed domain so the browser can find the same vault.
+On first use, create a vault passphrase (10+ characters), then add the GitHub username/PAT and optional OpenAI key in Settings. Choose a repository from the dropdown or type an owner/repository name in the search field to filter the list; searching works on both Home and Upload. Credentials are encrypted with Web Crypto AES-GCM and saved in this browser's IndexedDB. When reopening the installed app, enter only the vault passphrase; repository selection and credentials load automatically. The passphrase itself is never saved. If forgotten, the encrypted vault cannot be recovered. Use the same browser and deployed domain so the browser can find the same vault.
 
 ## Files to deploy
 

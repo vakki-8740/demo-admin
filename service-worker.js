@@ -1,4 +1,4 @@
-const CACHE_NAME = 'github-project-manager-v3';
+const CACHE_NAME = 'github-project-manager-v4';
 const APP_SHELL = [
   '/', '/index.html', '/style.css', '/script.js', '/manifest.webmanifest',
   '/icons/app-icon-192.png', '/icons/app-icon-512.png', '/icons/app-icon.svg', '/icons/favicon.svg', '/icons/github-logo.svg',
