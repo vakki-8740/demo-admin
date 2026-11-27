@@ -3,7 +3,7 @@
 // Static-hosted app: encrypted vault credentials are unlocked locally in this browser.
 // GitHub/OpenAI requests go directly from this browser.
 const API_ROOT = 'https://api.github.com';
-const DB_NAME='github-manager-vault';const DB_STORE='encrypted-settings';const VAULT_ID='main';const KDF_ITERATIONS=310000;
+const DB_NAME='github-manager-vault';const DB_STORE='encrypted-settings';const VAULT_ID='main';const KDF_ITERATIONS=310000;let vaultWriteQueue=Promise.resolve();
 const MAX_FILE_BYTES = 95 * 1024 * 1024;
 const MAX_TREE_ENTRIES = 100000;
 const els = Object.fromEntries([
@@ -14,7 +14,7 @@ Object.assign(els, Object.fromEntries([
   'repoSelectUpload','repoSearchUpload','uploadPermissionMirror','homeNotice','fileSearch','createFile','refreshHistory','historySummary','historyList','historyEmpty','saveFileEdit','editorStatus','uploadModeReplace'
 ].map(id => [id, document.getElementById(id)])));
 const state = {
-  db:null,key:null,vaultExists:false,credentials: { username: '', token: '', openaiKey: '' }, repos: [], selectedRepo: null,
+  db:null,key:null,vaultExists:false,credentials: { username: '', token: '', openaiKey: '' }, accounts:[],activeAccountId:null,addingAccount:false,returnAccountId:null,accountEpoch:0,repos: [], selectedRepo: null,
   files: [], currentDir: '', selectedPaths: new Set(), busy: false,
   activityHistory: [], editorPath: null, editorSha: null
 };
@@ -38,6 +38,7 @@ function setProgress(percent, label) {
 }
 function setBusy(value) {
   state.busy = value;
+  notifyAccounts();
   document.body.classList.toggle('is-busy', value);
   els.uploadButton.disabled = value || !state.selectedRepo || !includedLocalFiles().length || !canWrite(state.selectedRepo);
   els.refreshRepos.disabled = value;
@@ -63,13 +64,33 @@ function writeVaultRecord(record){return new Promise((resolve,reject)=>{const tx
 function bytesToB64(bytes){let s='';for(let i=0;i<bytes.length;i+=0x8000)s+=String.fromCharCode(...bytes.subarray(i,i+0x8000));return btoa(s);}
 function b64ToBytes(value){return Uint8Array.from(atob(value),c=>c.charCodeAt(0));}
 async function deriveVaultKey(passphrase,salt,iterations=KDF_ITERATIONS){const material=await crypto.subtle.importKey('raw',new TextEncoder().encode(passphrase),'PBKDF2',false,['deriveKey']);return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations,hash:'SHA-256'},material,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);}
-async function saveEncryptedSettings(settings){if(!state.key)throw new Error('Unlock the vault before saving settings.');const prior=await readVaultRecord();if(!prior)throw new Error('Encrypted vault record is missing.');const iv=crypto.getRandomValues(new Uint8Array(12));const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},state.key,new TextEncoder().encode(JSON.stringify(settings)));await writeVaultRecord({id:VAULT_ID,version:1,iterations:prior.iterations||KDF_ITERATIONS,salt:prior.salt,iv:bytesToB64(iv),ciphertext:bytesToB64(new Uint8Array(cipher))});}
-function configureVaultScreen(exists){state.vaultExists=exists;els.vaultConfirmField.hidden=exists;els.vaultTitle.textContent=exists?'Unlock your vault':'Create your local vault';els.vaultDescription.textContent=exists?'Enter your vault passphrase. Your saved GitHub and OpenAI credentials will load automatically.':'Set a passphrase once. Your GitHub and optional OpenAI credentials will then be encrypted in this browser.';els.loginButton.textContent=exists?'Unlock vault':'Create encrypted vault';els.loginPassword.autocomplete=exists?'current-password':'new-password';}
+function newAccountId(){return crypto.randomUUID?crypto.randomUUID():bytesToB64(crypto.getRandomValues(new Uint8Array(18)));}
+function accountPublicList(){return state.accounts.map(({id,username,selectedRepo})=>({id,username,selectedRepo}));}
+function notifyAccounts(){window.dispatchEvent(new CustomEvent('ghpm:accounts',{detail:{accounts:accountPublicList(),activeAccountId:state.activeAccountId,addingAccount:state.addingAccount,busy:state.busy}}));}
+function persistVaultPayload(payload){if(!state.key)return Promise.reject(new Error('Unlock the vault before saving settings.'));const serialized=JSON.stringify(payload);const task=vaultWriteQueue.catch(()=>{}).then(async()=>{const prior=await readVaultRecord();if(!prior)throw new Error('Encrypted vault record is missing.');const iv=crypto.getRandomValues(new Uint8Array(12));const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},state.key,new TextEncoder().encode(serialized));await writeVaultRecord({id:VAULT_ID,version:2,iterations:prior.iterations||KDF_ITERATIONS,salt:prior.salt,iv:bytesToB64(iv),ciphertext:bytesToB64(new Uint8Array(cipher))});});vaultWriteQueue=task;return task;}
+async function saveEncryptedSettings(settings){
+  if(!state.key)throw new Error('Unlock the vault before saving settings.');
+  let id=state.activeAccountId;const current=state.accounts.find(a=>a.id===id);
+  if(state.addingAccount&&state.accounts.some(a=>a.username?.toLowerCase()===settings.username?.toLowerCase()))throw new Error('This GitHub account is already saved. Switch to it from the account menu instead.');
+  if(state.addingAccount||!id){id=newAccountId();state.addingAccount=false;}
+  else if(current&&settings.username&&current.username.toLowerCase()!==settings.username.toLowerCase())throw new Error('This changes the account username. Use “Add account” to connect another GitHub account without replacing this one.');
+  const next={...settings,id};
+  if(!next.username||!next.token){state.accounts=state.accounts.filter(a=>a.id!==id);if(state.activeAccountId===id){state.activeAccountId=state.accounts[0]?.id||null;state.credentials=state.accounts.find(a=>a.id===state.activeAccountId)||{username:'',token:'',openaiKey:'',selectedRepo:''};}}
+  else{const index=state.accounts.findIndex(a=>a.id===id);if(index<0)state.accounts.push(next);else state.accounts[index]=next;state.activeAccountId=id;state.credentials=next;}
+  state.returnAccountId=null;
+  await persistVaultPayload({schemaVersion:2,accounts:state.accounts,activeAccountId:state.activeAccountId});notifyAccounts();
+}
+
+function configureVaultScreen(exists){state.vaultExists=exists;els.vaultConfirmField.hidden=exists;els.vaultTitle.textContent=exists?'Unlock your vault':'Create your local vault';els.vaultDescription.textContent=exists?'Enter your vault passphrase to unlock all saved GitHub accounts and their optional OpenAI keys.':'Set a passphrase once. Save multiple GitHub accounts; their tokens and optional OpenAI keys stay encrypted in this browser.';els.loginButton.textContent=exists?'Unlock vault':'Create encrypted vault';els.loginPassword.autocomplete=exists?'current-password':'new-password';}
 async function initializeVault(){els.loginScreen.hidden=false;els.app.hidden=true;if(!window.isSecureContext||!window.crypto?.subtle||!window.indexedDB){showNotice(els.loginNotice,'Browser encryption is unavailable here. Open the deployed app over HTTPS in a current browser.','error');els.loginButton.disabled=true;return;}try{state.db=await openDatabase();const record=await readVaultRecord();configureVaultScreen(Boolean(record));}catch(error){showNotice(els.loginNotice,error.message,'error');}}
-async function createVault(passphrase){const salt=crypto.getRandomValues(new Uint8Array(16));state.key=await deriveVaultKey(passphrase,salt);state.credentials={username:'',token:'',openaiKey:'',selectedRepo:''};const iv=crypto.getRandomValues(new Uint8Array(12));const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},state.key,new TextEncoder().encode(JSON.stringify(state.credentials)));await writeVaultRecord({id:VAULT_ID,version:1,iterations:KDF_ITERATIONS,salt:bytesToB64(salt),iv:bytesToB64(iv),ciphertext:bytesToB64(new Uint8Array(cipher))});state.vaultExists=true;enterApp();goPage('settings');}
-async function unlockVault(passphrase,record){const iterations=record.iterations||KDF_ITERATIONS;state.key=await deriveVaultKey(passphrase,b64ToBytes(record.salt),iterations);const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:b64ToBytes(record.iv)},state.key,b64ToBytes(record.ciphertext));state.credentials=JSON.parse(new TextDecoder().decode(plain));state.vaultExists=true;enterApp();}
+async function createVault(passphrase){const salt=crypto.getRandomValues(new Uint8Array(16));state.key=await deriveVaultKey(passphrase,salt);state.accounts=[];state.activeAccountId=null;state.addingAccount=false;state.credentials={username:'',token:'',openaiKey:'',selectedRepo:''};const iv=crypto.getRandomValues(new Uint8Array(12));const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},state.key,new TextEncoder().encode(JSON.stringify({schemaVersion:2,accounts:[],activeAccountId:null})));await writeVaultRecord({id:VAULT_ID,version:2,iterations:KDF_ITERATIONS,salt:bytesToB64(salt),iv:bytesToB64(iv),ciphertext:bytesToB64(new Uint8Array(cipher))});state.vaultExists=true;notifyAccounts();enterApp();goPage('settings');}
+async function unlockVault(passphrase,record){const iterations=record.iterations||KDF_ITERATIONS;state.key=await deriveVaultKey(passphrase,b64ToBytes(record.salt),iterations);const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:b64ToBytes(record.iv)},state.key,b64ToBytes(record.ciphertext));const saved=JSON.parse(new TextDecoder().decode(plain));if(Array.isArray(saved.accounts)){state.accounts=saved.accounts;state.activeAccountId=saved.activeAccountId||state.accounts[0]?.id||null;}else{const legacy=saved;if(legacy.username&&legacy.token){const migrated={...legacy,id:newAccountId()};state.accounts=[migrated];state.activeAccountId=migrated.id;}else{state.accounts=[];state.activeAccountId=null;}}state.addingAccount=false;state.credentials={...(state.accounts.find(a=>a.id===state.activeAccountId)||{username:'',token:'',openaiKey:'',selectedRepo:''})};state.vaultExists=true;await persistVaultPayload({schemaVersion:2,accounts:state.accounts,activeAccountId:state.activeAccountId});notifyAccounts();enterApp();}
+
 function enterApp(){els.loginScreen.hidden=true;els.app.hidden=false;els.loginPassword.value='';els.loginConfirm.value='';fillSettingsForm();if(state.credentials.token&&state.credentials.username){els.connectionBadge.querySelector('span').textContent='Connecting…';refreshRepositories();}else{els.connectionBadge.classList.add('offline');els.connectionBadge.querySelector('span').textContent='Setup needed';renderRepoOptions('Save GitHub credentials in Settings');goPage('settings');}}
-function signOut(){state.key=null;state.credentials={username:'',token:'',openaiKey:''};state.repos=[];state.selectedRepo=null;state.files=[];state.selectedPaths.clear();els.settingsUsername.value='';els.settingsToken.value='';els.settingsOpenai.value='';els.app.hidden=true;els.loginScreen.hidden=false;els.loginPassword.value='';els.loginConfirm.value='';els.connectionBadge.classList.add('offline');configureVaultScreen(true);els.loginPassword.focus();}
+async function switchAccount(id){if(state.busy)return;const next=state.accounts.find(a=>a.id===id);if(!next)return;if(state.activeAccountId===id&&!state.addingAccount)return;state.accountEpoch++;state.activeAccountId=id;state.addingAccount=false;state.returnAccountId=null;state.credentials={...next};state.repos=[];state.selectedRepo=null;state.files=[];state.currentDir='';state.selectedPaths.clear();state.repoSearch='';if(els.repoSearch)els.repoSearch.value='';if(els.repoSearchUpload)els.repoSearchUpload.value='';els.filePreviewPanel.hidden=true;fillSettingsForm();renderRepoOptions('Connecting to selected account…');goPage('home');els.connectionBadge.classList.add('offline');els.connectionBadge.querySelector('span').textContent='Connecting…';await persistVaultPayload({schemaVersion:2,accounts:state.accounts,activeAccountId:state.activeAccountId});notifyAccounts();if(state.credentials.token)await refreshRepositories();else{els.connectionBadge.querySelector('span').textContent='Setup needed';goPage('settings');}}
+function addAccount(){if(state.busy||state.addingAccount)return;state.accountEpoch++;state.returnAccountId=state.activeAccountId;state.activeAccountId=null;state.addingAccount=true;state.credentials={username:'',token:'',openaiKey:'',selectedRepo:''};state.repos=[];state.selectedRepo=null;state.files=[];state.selectedPaths.clear();fillSettingsForm();setSettingsStatus('Add another GitHub account. Your existing saved accounts will stay connected.');els.connectionBadge.classList.add('offline');els.connectionBadge.querySelector('span').textContent='Adding account';goPage('settings');notifyAccounts();}
+async function cancelAddAccount(){if(state.busy)return;const back=state.returnAccountId;state.addingAccount=false;state.activeAccountId=null;state.returnAccountId=null;const account=state.accounts.find(a=>a.id===back);state.credentials={username:'',token:'',openaiKey:'',selectedRepo:''};fillSettingsForm();notifyAccounts();if(account)await switchAccount(account.id);else goPage('settings');}
+function signOut(){state.accountEpoch++;state.key=null;state.credentials={username:'',token:'',openaiKey:''};state.repos=[];state.selectedRepo=null;state.files=[];state.selectedPaths.clear();els.settingsUsername.value='';els.settingsToken.value='';els.settingsOpenai.value='';els.app.hidden=true;els.loginScreen.hidden=false;els.loginPassword.value='';els.loginConfirm.value='';els.connectionBadge.classList.add('offline');configureVaultScreen(true);els.loginPassword.focus();}
 async function submitVaultForm(event){event.preventDefault();clearNotice(els.loginNotice);const pass=els.loginPassword.value;if(pass.length<10)return showNotice(els.loginNotice,'Use a passphrase with at least 10 characters.','error');els.loginButton.disabled=true;try{if(state.vaultExists){const record=await readVaultRecord();await unlockVault(pass,record);}else{if(pass!==els.loginConfirm.value)return showNotice(els.loginNotice,'Passphrases do not match.','error');await createVault(pass);}}catch(error){state.key=null;showNotice(els.loginNotice,state.vaultExists?'That passphrase is incorrect or the vault is damaged.':'Could not create the vault: '+error.message,'error');}finally{els.loginButton.disabled=false;els.loginButton.textContent=state.vaultExists?'Unlock vault':'Create encrypted vault';}}
 
 // ---- GitHub REST API ----
@@ -117,10 +138,12 @@ function getDefaultBranch(repo = state.selectedRepo) { return repo?.default_bran
 function canWrite(repo = state.selectedRepo) { return Boolean(repo && (!repo.permissions || repo.permissions.push !== false)); }
 
 async function getUser() { return githubRequest('/user'); }
-async function fetchAllRepositories() {
+async function fetchAllRepositories(epoch=state.accountEpoch) {
   const all = [];
   for (let page = 1; page <= 50; page++) {
+    if(epoch!==state.accountEpoch)return [];
     const part = await githubRequest(`/user/repos?visibility=all&affiliation=owner%2Ccollaborator%2Corganization_member&sort=full_name&per_page=100&page=${page}`);
+    if(epoch!==state.accountEpoch)return [];
     all.push(...part);
     if (part.length < 100) break;
   }
@@ -128,7 +151,7 @@ async function fetchAllRepositories() {
 }
 function repoLabel(repo) { return `${repo.full_name}${repo.private ? ' · private' : ''}${canWrite(repo) ? '' : ' · read-only'}`; }
 function renderRepoOptions(placeholder = 'Select a repository…') {
-  const prior = state.credentials.selectedRepo || localStorage.getItem('selectedRepo') || state.selectedRepo?.full_name || '';
+  const prior = state.credentials.selectedRepo || state.selectedRepo?.full_name || '';
   const selected = state.repos.find(repo => repo.full_name === prior) || state.repos.find(canWrite) || state.repos[0] || null;
   const query = (els.repoSearch?.value || els.repoSearchUpload?.value || '').trim().toLocaleLowerCase();
   const matches = state.repos.filter(repo => !query || [repo.full_name,repo.name,repo.description,repo.language].filter(Boolean).some(value => value.toLocaleLowerCase().includes(query)));
@@ -143,19 +166,22 @@ function renderRepoOptions(placeholder = 'Select a repository…') {
     select.value = selected?.full_name || '';
   });
   state.selectedRepo = selected;
-  if (selected) { state.credentials.selectedRepo = selected.full_name; try {localStorage.setItem('selectedRepo',selected.full_name);} catch {} if(state.key)saveEncryptedSettings(state.credentials).catch(()=>{}); }
+  if (selected) { state.credentials.selectedRepo = selected.full_name; if(state.key)saveEncryptedSettings(state.credentials).catch(()=>{}); }
   updateSelectedRepoUI();
 }
 
 async function refreshRepositories() {
+  const epoch=state.accountEpoch;
   if (!state.credentials.token) { renderRepoOptions('Set up GitHub credentials in Settings'); return; }
   els.refreshRepos.disabled = true;
   els.connectionBadge.classList.add('offline');
   els.connectionBadge.querySelector('span').textContent = 'Connecting…';
   try {
     const me = await getUser();
+    if(epoch!==state.accountEpoch)return;
     if (me.login.toLowerCase() !== state.credentials.username.toLowerCase()) throw new Error(`Token account is “${me.login}”, but Settings username is “${state.credentials.username}”.`);
-    state.repos = await fetchAllRepositories();
+    state.repos = await fetchAllRepositories(epoch);
+    if(epoch!==state.accountEpoch)return;
     renderRepoOptions(state.repos.length ? 'Select a repository…' : 'No accessible repositories found');
     els.connectionBadge.classList.remove('offline');
     els.connectionBadge.querySelector('span').textContent = `${me.login} · ${state.repos.length} repos`;
@@ -165,12 +191,13 @@ async function refreshRepositories() {
     }
     if (document.querySelector('[data-page-panel="manager"]').classList.contains('active') && state.selectedRepo) await refreshContents();
   } catch (error) {
+    if(epoch!==state.accountEpoch)return;
     els.connectionBadge.classList.add('offline');
     els.connectionBadge.querySelector('span').textContent = 'Connection failed';
     renderRepoOptions('Could not load repositories');
     showNotice(els.uploadNotice, error.message, 'error');
     showNotice(els.managerNotice, error.message, 'error');
-  } finally { els.refreshRepos.disabled = false; updateSelectedRepoUI(); }
+  } finally { if(epoch===state.accountEpoch){els.refreshRepos.disabled = false; updateSelectedRepoUI();} }
 }
 function updateSelectedRepoUI() {
   const repo = state.selectedRepo;
@@ -300,28 +327,36 @@ async function uploadProject(event) {
 
 // ---- Repository browser and Git-tree mutations ----
 function repoBranchRefPath(repo=state.selectedRepo) { return `${apiRepoPath(repo)}/git/ref/heads/${encodeBranch(getDefaultBranch(repo))}`; }
-async function loadRepositoryFiles() {
+async function loadRepositoryFiles(repo=state.selectedRepo,epoch=state.accountEpoch) {
+  if(!repo)return;
   let ref;
-  try { ref=await githubRequest(repoBranchRefPath()); }
+  try { ref=await githubRequest(repoBranchRefPath(repo)); }
   catch(error) {
+    if(epoch!==state.accountEpoch)return;
     if(/git repository is empty|repository is empty/i.test(error.message)) { state.files=[]; state.selectedPaths.clear(); state.currentDir=''; return; }
     throw error;
   }
-  const commit=await githubRequest(`${apiRepoPath()}/git/commits/${ref.object.sha}`);
-  const tree=await githubRequest(`${apiRepoPath()}/git/trees/${commit.tree.sha}?recursive=1`);
+  if(epoch!==state.accountEpoch)return;
+  const commit=await githubRequest(`${apiRepoPath(repo)}/git/commits/${ref.object.sha}`);
+  if(epoch!==state.accountEpoch)return;
+  const tree=await githubRequest(`${apiRepoPath(repo)}/git/trees/${commit.tree.sha}?recursive=1`);
+  if(epoch!==state.accountEpoch)return;
   if(tree.truncated) throw new Error('GitHub truncated this repository tree. Browse a smaller repository or use the GitHub website for the full listing.');
   state.files=(tree.tree||[]).filter(item=>item.type==='blob').map(item=>({path:item.path,sha:item.sha,size:item.size||0,mode:item.mode})).sort((a,b)=>a.path.localeCompare(b.path));
   state.selectedPaths.clear(); state.currentDir='';
 }
+
 function setManagerMessage(message,type='') { els.managerMessage.textContent=message;els.managerMessage.className=`manager-message ${type}`.trim(); }
 async function refreshContents() {
   if(!state.selectedRepo){setManagerMessage('Select a repository to browse its files.');renderFileList();return;}
   if(!state.credentials.token){setManagerMessage('Add GitHub credentials in Settings first.','error');return;}
-  setManagerMessage(`Loading ${state.selectedRepo.full_name}…`);els.refreshContents.disabled=true;clearNotice(els.managerNotice);
-  try {await loadRepositoryFiles();setManagerMessage(`${state.files.length} tracked ${state.files.length===1?'file':'files'} on ${getDefaultBranch()}.`);renderFileList();}
-  catch(error){setManagerMessage(error.message,'error');state.files=[];renderFileList();}
-  finally{els.refreshContents.disabled=false;updateSelectedRepoUI();}
+  const epoch=state.accountEpoch,repo=state.selectedRepo;
+  setManagerMessage(`Loading ${repo.full_name}…`);els.refreshContents.disabled=true;clearNotice(els.managerNotice);
+  try {await loadRepositoryFiles(repo,epoch);if(epoch!==state.accountEpoch)return;setManagerMessage(`${state.files.length} tracked ${state.files.length===1?'file':'files'} on ${getDefaultBranch(repo)}.`);renderFileList();}
+  catch(error){if(epoch!==state.accountEpoch)return;setManagerMessage(error.message,'error');state.files=[];renderFileList();}
+  finally{if(epoch===state.accountEpoch){els.refreshContents.disabled=false;updateSelectedRepoUI();}}
 }
+
 function directEntries(dir) {
   const prefix=dir?`${dir}/`:'';const folders=new Set();const files=[];
   for(const file of state.files){if(!file.path.startsWith(prefix))continue;const rest=file.path.slice(prefix.length);if(!rest)continue;const slash=rest.indexOf('/');if(slash>=0)folders.add(prefix+rest.slice(0,slash));else files.push(file);}
@@ -474,8 +509,8 @@ function fillSettingsForm() {
   els.settingsUsername.value=state.credentials.username||'';
   els.settingsToken.value=state.credentials.token||'';
   els.settingsOpenai.value=state.credentials.openaiKey||'';
-  els.saveSettings.textContent=state.credentials.token?'Update settings':'Save settings';
-  setSettingsStatus(state.credentials.token?'Credentials are encrypted in this browser vault.':'Add GitHub credentials and save them to the encrypted vault.');
+  els.saveSettings.textContent=state.addingAccount?'Connect account':(state.credentials.token?'Update settings':'Save settings');
+  setSettingsStatus(state.addingAccount?'Add another GitHub account. Existing accounts will stay saved.':(state.credentials.token?'Credentials are encrypted in this browser vault.':'Add GitHub credentials and save them to the encrypted vault.'));
 }
 async function saveSettings(event) {
   event.preventDefault();
@@ -489,17 +524,19 @@ async function testConnection() {
   const enteredToken=els.settingsToken.value.trim()||state.credentials.token;const enteredUsername=els.settingsUsername.value.trim()||state.credentials.username;
   if(!enteredToken||!enteredUsername)return setSettingsStatus('Enter a GitHub username and token first.','error');
   const previous=state.credentials;state.credentials={...previous,username:enteredUsername,token:enteredToken};
-  els.testConnection.disabled=true;setSettingsStatus('Testing GitHub connection…');
+  els.testConnection.disabled=true;setBusy(true);setSettingsStatus('Testing GitHub connection…');
   try{const me=await getUser();if(me.login.toLowerCase()!==enteredUsername.toLowerCase())throw new Error(`Token belongs to “${me.login}”, not “${enteredUsername}”.`);const repos=await fetchAllRepositories();setSettingsStatus(`Connected as ${me.login}. Found ${repos.length} accessible repositories.`,'success');}
   catch(error){setSettingsStatus(error.message,'error');}
-  finally{state.credentials=previous;els.testConnection.disabled=false;}
+  finally{state.credentials=previous;els.testConnection.disabled=false;setBusy(false);}
 }
 async function clearCredentials() {
-  if(!window.confirm('Clear the saved GitHub and OpenAI credentials from this encrypted browser vault?'))return;
-  const empty={username:'',token:'',openaiKey:'',selectedRepo:''};
-  try{await saveEncryptedSettings(empty);state.credentials=empty;state.repos=[];state.selectedRepo=null;state.files=[];state.selectedPaths.clear();fillSettingsForm();renderRepoOptions('Set up credentials in Settings');els.connectionBadge.classList.add('offline');els.connectionBadge.querySelector('span').textContent='Setup needed';setSettingsStatus('Credentials cleared from the encrypted vault.','success');}
+  if(!state.activeAccountId)return setSettingsStatus('There is no saved active account to remove.','error');
+  const name=state.credentials.username||'this account';if(!window.confirm(`Remove ${name} and its saved token from this encrypted browser vault? Other accounts will remain.`))return;
+  state.accountEpoch++;state.accounts=state.accounts.filter(a=>a.id!==state.activeAccountId);state.activeAccountId=state.accounts[0]?.id||null;state.credentials={...(state.accounts.find(a=>a.id===state.activeAccountId)||{username:'',token:'',openaiKey:'',selectedRepo:''})};state.repos=[];state.selectedRepo=null;state.files=[];state.selectedPaths.clear();
+  try{await persistVaultPayload({schemaVersion:2,accounts:state.accounts,activeAccountId:state.activeAccountId});fillSettingsForm();notifyAccounts();setSettingsStatus(name+' removed from this browser vault.','success');if(state.credentials.token){goPage('home');await refreshRepositories();}else{renderRepoOptions('Add a GitHub account in Settings');els.connectionBadge.classList.add('offline');els.connectionBadge.querySelector('span').textContent='Setup needed';}}
   catch(error){setSettingsStatus(error.message,'error');}
 }
+
 async function suggestExclusions() {
   if(!state.credentials.openaiKey)return showNotice(els.uploadNotice,'Add an OpenAI API key in Settings to get exclusion suggestions. Upload works without it.','error');
   if(!selectedLocalFiles.length)return showNotice(els.uploadNotice,'Select a project folder first so suggestions are based on its file list.','error');
@@ -537,7 +574,7 @@ document.querySelectorAll('[data-go]').forEach(button=>button.addEventListener('
   state.credentials.selectedRepo=state.selectedRepo?.full_name||'';state.files=[];state.currentDir='';state.selectedPaths.clear();els.filePreviewPanel.hidden=true;
   updateSelectedRepoUI();if(state.selectedRepo&&document.querySelector('[data-page-panel="manager"]').classList.contains('active'))refreshContents();
   if(state.selectedRepo&&document.querySelector('[data-page-panel="history"]').classList.contains('active'))refreshHistory();
-  try{if(state.selectedRepo)localStorage.setItem('selectedRepo',state.selectedRepo.full_name);}catch{}if(state.selectedRepo&&state.key)saveEncryptedSettings(state.credentials).catch(()=>{});
+  if(state.selectedRepo&&state.key)saveEncryptedSettings(state.credentials).catch(()=>{});
 }));
 els.chooseFolder.addEventListener('click',()=>els.folderInput.click());
 els.folderInput.addEventListener('change',()=>{
@@ -567,6 +604,5 @@ document.querySelectorAll('[data-install-app]').forEach(button=>button.addEventL
   const notice=els.loginScreen.hidden?els.homeNotice:els.loginNotice;
   showNotice(notice,instructions,'info');
 }));
-if('serviceWorker' in navigator && (location.protocol==='https:' || location.hostname==='localhost'))navigator.serviceWorker.register('./service-worker.js').catch(()=>{});
-
+window.GHPMAccounts={snapshot:()=>({accounts:accountPublicList(),activeAccountId:state.activeAccountId,addingAccount:state.addingAccount,busy:state.busy}),switchAccount,addAccount,cancelAddAccount};
 initializeVault();

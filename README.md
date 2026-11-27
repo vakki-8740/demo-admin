@@ -1,30 +1,38 @@
 # GitHub Project Manager
 
-Installable, desktop-first HTML/CSS/vanilla-JavaScript app for Vercel or any HTTPS static host. GitHub/OpenAI requests go directly from the browser; no backend is required.
+A React + Vite desktop web app for GitHub uploads and repository management. GitHub/OpenAI API requests run directly in the browser; there is no backend service or database.
 
-## Install on your device
+## Run locally
 
-Deploy the files below to the root of your Vercel project. Open the deployed HTTPS URL in Chrome/Edge and press **Install app** in the UI (or use the browser's Install option). On iPhone/iPad, use Safari **Share → Add to Home Screen**; on Safari for Mac, use **File → Add to Dock**. The service worker caches the app shell so the interface can open offline; GitHub and OpenAI actions still require internet.
+Requires Node.js 20.19+ (or a compatible current LTS) and npm:
 
-## Vault and credentials
+```bash
+npm install
+npm run dev
+```
 
-On first use, create a vault passphrase (10+ characters), then add the GitHub username/PAT and optional OpenAI key in Settings. Choose a repository from the dropdown or type an owner/repository name in the search field to filter the list; searching works on both Home and Upload. Credentials are encrypted with Web Crypto AES-GCM and saved in this browser's IndexedDB. When reopening the installed app, enter only the vault passphrase; repository selection and credentials load automatically. The passphrase itself is never saved. If forgotten, the encrypted vault cannot be recovered. Use the same browser and deployed domain so the browser can find the same vault.
+For a production build, run `npm run build`; Vite writes the deployable site to `dist/`.
 
-## Windows command-line companion (CLI)
+## Deploy to Vercel
 
-The ZIP also includes a Windows CLI that mirrors the dashboard's repository workflows: select/search repositories; search/list files; show or download files; create/edit/move/delete files; delete folders; view commit history; upload a folder in merge or replace mode; and optionally request OpenAI exclusion suggestions. It only acts on repositories your GitHub token can access, reads local files only from the folder you pass to `ghpm upload`, and asks for confirmation before destructive changes. It does not provide arbitrary remote shell commands or Windows administrator access.
+Import this project into Vercel with **Framework Preset: Vite**, **Build Command: `npm run build`**, and **Output Directory: `dist`**. Vercel installs from `package-lock.json`. Keep the `public/` directory; it supplies the PWA manifest, service worker, and app icons.
 
-1. Extract the complete ZIP on Windows.
-2. Open PowerShell in the extracted folder and run `powershell -ExecutionPolicy Bypass -File .\install-cli.ps1`. The installer checks for Node.js LTS (and can offer winget installation).
-3. Close and reopen Terminal. Run `ghpm auth login` once, enter your GitHub username and PAT, then `ghpm repo list` and `ghpm repo use 1` (or choose by `owner/repo`). The token is encrypted by Windows for your current user; it is not stored in project files.
-4. Run `ghpm help` for commands. Example: `ghpm upload "C:\Users\you\Desktop\my-project" --exclude .env`.
+## Encrypted multi-account vault
 
-The CLI has its own Windows credential store and default-repository setting; it does not read or share the browser's IndexedDB vault. It works on that Windows account/profile; reinstalling Windows or changing user profiles may require signing in again. `ghpm auth logout` deletes the CLI's saved credentials. OpenAI is optional; configure it once with `ghpm settings openai` to use CLI suggestions.
+Create a vault passphrase once. Existing single-account vaults are upgraded when first unlocked; the saved GitHub account is retained. To connect another account, click **Add account** in the header, enter its GitHub username and PAT in Settings, and save. Use the header account menu to switch immediately between saved accounts. Each account remembers its own token, optional OpenAI key, and selected repository. Remove only the active account from Settings with **Remove current account**. All account data stays encrypted in the same browser vault using AES-GCM; the passphrase is not stored.
 
-## Files to deploy
+Use the same browser and deployed origin to access the vault. If the passphrase is forgotten, or browser data is cleared, the encrypted accounts cannot be recovered. The Windows CLI has a separate credential store and is not connected to the browser account switcher.
 
-Keep `index.html`, `style.css`, `script.js`, `manifest.webmanifest`, `service-worker.js`, and the complete `icons/` directory together at the site root. The `icons/` folder contains local SVG UI icons, a green GitHub logo/favicon, and matching 192/512px PWA app icons.
+## Repositories and permissions
 
-Fine-grained GitHub PATs need access to the selected repository and Contents read/write permission for upload/edit/delete operations. Classic PATs generally need `repo` scope for private repositories. Use an expiration date and keep tokens private.
+Public and private repositories are supported when the selected account's GitHub token can access them. Fine-grained PATs need the appropriate repository access and **Contents: read/write** permission for file management; classic PATs generally need `repo` for private repositories. One account's token can access multiple repositories. Account switching changes the GitHub identity and repository list; it does not bypass GitHub permissions.
 
-UI icons are from [Iconoir](https://github.com/iconoir-icons/iconoir), licensed under MIT; `icons/LICENSE` contains the license notice.
+The app is currently designed for desktop screens. Existing file browsing/editing remains available; a live rendered website preview is not included yet.
+
+## Windows CLI
+
+The ZIP/source also includes a Windows command-line companion for repository workflows. Run `powershell -ExecutionPolicy Bypass -File .\install-cli.ps1` from an extracted project folder, reopen Terminal, then use `ghpm auth login` and `ghpm help`. It uses one CLI account at a time; the browser's multi-account selector does not change CLI credentials. The CLI stores its token separately, encrypted for the current Windows user.
+
+## Icons
+
+UI icons use [Iconoir](https://github.com/iconoir-icons/iconoir), licensed under MIT; `icons/LICENSE` and `public/icons/LICENSE` contain the notice.
